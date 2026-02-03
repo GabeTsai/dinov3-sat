@@ -17,6 +17,7 @@ from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
+from dinov3.layers.patch_embed import patch_first_conv
 from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
 from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
@@ -320,6 +321,12 @@ class SSLMetaArch(nn.Module):
                     keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                     process_group=distributed.get_default_process_group(),
                 )
+                if self.cfg.student.in_chans != 3:
+                    logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
+                    patch_first_conv(self.gram_teacher.backbone, 
+                                     new_in_channels=self.cfg.student.in_chans,
+                                     default_in_channels=3,
+                                     pretrained=True)
                 self.gram_teacher_initialized = True
             else:
                 raise ValueError(f"Provide a correct path to {self.gram_ckpt}")
@@ -334,6 +341,12 @@ class SSLMetaArch(nn.Module):
                 keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                 process_group=distributed.get_process_subgroup(),
             )
+            if self.cfg.student.in_chans != 3:
+                logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
+                patch_first_conv(self.student.backbone, 
+                                new_in_channels=self.cfg.student.in_chans,
+                                default_in_channels=3,
+                                pretrained=True)
             self.model_ema.load_state_dict(self.student.state_dict())
         if self.cfg.distillation.enabled:
             if self.cfg.distillation.checkpoint_path != "ignore":
@@ -345,6 +358,12 @@ class SSLMetaArch(nn.Module):
                     keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                     process_group=distributed.get_default_process_group(),
                 )
+                if self.cfg.student.in_chans != 3:
+                    logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
+                    patch_first_conv(self.teacher.backbone, 
+                                     new_in_channels=self.cfg.student.in_chans,
+                                     default_in_channels=3,
+                                     pretrained=True)
             else:
                 logger.info("Init teacher to distil from, used for testing purpose only")
                 self.teacher.backbone.init_weights()
