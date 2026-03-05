@@ -41,6 +41,7 @@ train:
   seed: 0
   num_workers: 10
   cache_dataset: true # if true, shard fixed subsets of dataset to each GPU
+  # controls when training steps/LR, warmup, momentum schedules so make sure to set correctly
   OFFICIAL_EPOCH_LENGTH: 24 # steps/epoch ≈ ceil(12249 / 512) = 24
   monitor_gradient_norm: false
   chunk_schedule: []
@@ -60,9 +61,9 @@ student:
   drop_path_rate: 0.3
   layerscale: 1.0e-05
   patch_drop: 0.0
-  pretrained_weights: 'path to vit satl checkpoint here'
   ffn_layer: swigul64
   ffn_ratio: 3
+  resume_from_teacher_chkpt: 'path to vit satl checkpoint here'
   qkv_bias: true
   proj_bias: true
   ffn_bias: true
