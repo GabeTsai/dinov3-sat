@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 
 import torch
 from torch.utils.data import Sampler
+from torchvision.datasets import ImageFolder
 
 from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
@@ -72,6 +73,8 @@ def _parse_dataset_str(dataset_str: str):
         class_ = NYU
         if "split" in kwargs:
             kwargs["split"] = NYU.Split[kwargs["split"]]
+    elif name == "ImageFolder":
+        class_ = ImageFolder
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 
@@ -100,7 +103,10 @@ def make_dataset(
     logger.info(f'using dataset: "{dataset_str}"')
 
     class_, kwargs = _parse_dataset_str(dataset_str)
-    dataset = class_(transform=transform, target_transform=target_transform, transforms=transforms, **kwargs)
+    if class_ is ImageFolder:
+        dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
+    else:
+        dataset = class_(transform=transform, target_transform=target_transform, transforms=transforms, **kwargs)
 
     logger.info(f"# of dataset samples: {len(dataset):,d}")
 

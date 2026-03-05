@@ -6,6 +6,7 @@
 import argparse
 import copy
 import gc
+import json
 import logging
 import math
 import os
@@ -39,6 +40,9 @@ from dinov3.logging import MetricLogger, setup_logging
 from dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosine_decay
 from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
 from dinov3.train.ssl_meta_arch import SSLMetaArch
+
+import wandb as _wandb
+from omegaconf import OmegaConf
 
 assert torch.__version__ >= (2, 1)
 torch.backends.cuda.matmul.allow_tf32 = True  # pytorch 1.12 sets this to false by default
@@ -91,6 +95,9 @@ For python-based LazyConfig, use "path.key=value".
     parser.add_argument("--record_ref_losses", action="store_true", help="record reference losses")
     parser.add_argument("--ref_losses_path", default="", type=str)
     parser.add_argument("--multi-distillation", action="store_true", help="run multi-distillation")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb-project", default="dinov3-sat", type=str, help="W&B project name.")
+    parser.add_argument("--wandb-run-name", default=None, type=str, help="W&B run name (optional).")
 
     return parser
 
@@ -550,6 +557,25 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(last_layer_lr=last_layer_lr)
         metric_logger.update(total_loss=total_loss, **metrics_dict)
 
+        # W&B: log every step on rank 0 only
+        if distributed.is_main_process():
+            try:
+                if _wandb.run is not None:
+                    _wlog = {
+                        "train/total_loss": total_loss.item() if hasattr(total_loss, "item") else float(total_loss),
+                        "train/lr": lr,
+                        "train/wd": wd,
+                        "train/mom": mom,
+                        "train/last_layer_lr": last_layer_lr,
+                        "train/teacher_temp": teacher_temp,
+                        "train/epoch": it / OFFICIAL_EPOCH_LENGTH,
+                    }
+                    for k, v in metrics_dict.items():
+                        _wlog[f"train/{k}"] = v.item() if hasattr(v, "item") else float(v)
+                    _wandb.log(_wlog, step=it)
+            except ImportError:
+                pass
+
         # Submit evaluation jobs
         if (
             cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
@@ -577,6 +603,13 @@ def do_train(cfg, model, resume=False):
         iteration = iteration + 1
     metric_logger.synchronize_between_processes()
 
+    if distributed.is_main_process():
+        try:
+            if _wandb.run is not None:
+                _wandb.finish()
+        except ImportError:
+            pass
+
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
@@ -600,6 +633,32 @@ def main(argv=None):
             output=os.path.join(os.path.abspath(args.output_dir), "nan_logs"),
             name="nan_logger",
         )
+    
+    # Resume W&B run if it exists
+    if getattr(args, "wandb", False) and distributed.is_main_process():
+        _wandb_id_file = Path(args.output_dir) / "wandb_run_id.json"
+        _wandb_resume = "allow"
+        _wandb_id = None
+        if _wandb_id_file.exists():
+            _wandb_id = json.loads(_wandb_id_file.read_text()).get("run_id")
+        if _wandb_id is None:
+            _wandb_id = _wandb.util.generate_id()
+            _wandb_id_file.parent.mkdir(parents=True, exist_ok=True)
+            _wandb_id_file.write_text(json.dumps({"run_id": _wandb_id}))
+        _cfg_dict = {}
+        try:
+            _cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        except Exception as e:
+            logger.error(f"Error converting config to container: {e}")
+        _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            id=_wandb_id,
+            resume=_wandb_resume,
+            config=_cfg_dict,
+            dir=args.output_dir,
+        )
+        logger.info("W&B run initialized: %s", _wandb.run.url)
     meta_arch = {
         "SSLMetaArch": SSLMetaArch,
         "MultiDistillationMetaArch": MultiDistillationMetaArch,
