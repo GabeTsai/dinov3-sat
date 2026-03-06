@@ -39,6 +39,8 @@ import torch.distributed.checkpoint.filesystem as dcpfs
 import torch.distributed.checkpoint.state_dict as dcpsd
 from torch.distributed.checkpoint.stateful import Stateful
 
+from dinov3.layers.patch_embed import convert_patch_embed_channels
+
 logger = logging.getLogger("dinov3")
 
 
@@ -271,12 +273,15 @@ def init_fsdp_model_from_checkpoint(
     skip_load_keys: List[str] | None = None,
     keys_not_sharded: List[str] | None = None,
     process_group: dist.ProcessGroup = None,
+    patch_embed_in_chans: int | None = None,
 ):
     if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
         if ("sat" in Path(checkpoint_path).name):
             raw = torch.load(checkpoint_path, map_location="cpu")
             chkpt = {f"backbone.{k}": v for k, v in raw.items()}
+            if patch_embed_in_chans is not None:
+                chkpt = convert_patch_embed_channels(chkpt, target_in_chans=patch_embed_in_chans)
         else:
             chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
         from torch.distributed.device_mesh import DeviceMesh, init_device_mesh

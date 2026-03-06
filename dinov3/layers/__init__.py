@@ -8,6 +8,6 @@ from .block import CausalSelfAttentionBlock, SelfAttentionBlock
 from .ffn_layers import Mlp, SwiGLUFFN
 from .fp8_linear import convert_linears_to_fp8
 from .layer_scale import LayerScale
-from .patch_embed import PatchEmbed
+from .patch_embed import PatchEmbed, convert_patch_embed_channels, patch_first_conv
 from .rms_norm import RMSNorm
 from .rope_position_encoding import RopePositionEmbedding

@@ -3,10 +3,39 @@
 # This software may be used and distributed in accordance with
 # the terms of the DINOv3 License Agreement.
 
+import logging
 import math
-from typing import Callable, Tuple, Union
+from typing import Callable, Dict, Tuple, Union
 import torch
 from torch import Tensor, nn
+
+logger = logging.getLogger("dinov3")
+
+
+def convert_patch_embed_channels(
+    state_dict: Dict[str, torch.Tensor],
+    target_in_chans: int,
+    proj_key: str = "backbone.patch_embed.proj.weight",
+) -> Dict[str, torch.Tensor]:
+    """Convert patch_embed.proj.weight in a CPU state dict to a different number of input channels.
+
+    Must be called before tensors are distributed (e.g. as DTensors) since it changes the weight shape.
+    For target_in_chans == 1: sums across the source channels (equivalent to patch_first_conv pretrained=True).
+    For target_in_chans > src_chans: tiles source channels then scales by src/target ratio.
+    """
+    if proj_key not in state_dict:
+        return state_dict
+    w = state_dict[proj_key]
+    src_chans = w.shape[1]
+    if src_chans == target_in_chans:
+        return state_dict
+    if target_in_chans == 1:
+        new_w = w.sum(dim=1, keepdim=True)
+    else:
+        indices = torch.arange(target_in_chans) % src_chans
+        new_w = w[:, indices] * (src_chans / target_in_chans)
+    logger.info(f"Converted {proj_key} from {src_chans} -> {target_in_chans} channels")
+    return {**state_dict, proj_key: new_w}
 
 
 def make_2tuple(x):
