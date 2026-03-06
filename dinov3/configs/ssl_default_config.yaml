@@ -90,6 +90,8 @@ student:
   ffn_layer: "mlp"
   ffn_ratio: 4.0
   resume_from_teacher_chkpt: ""
+  resume_from_teacher_chkpt_skip_load_keys: []
+  resume_from_teacher_chkpt_keys_not_sharded: []
   qkv_bias: true
   proj_bias: true
   ffn_bias: true
