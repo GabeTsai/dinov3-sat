@@ -321,11 +321,11 @@ class SSLMetaArch(nn.Module):
                     keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                     process_group=distributed.get_default_process_group(),
                 )
-                if self.cfg.student.in_chans != 3:
-                    logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
-                    patch_first_conv(self.gram_teacher.backbone, 
-                                     new_in_channels=self.cfg.student.in_chans,
-                                     default_in_channels=3,
+                if self.cfg.student.sar_in_chans:
+                    logger.info(f"Patching patch embed conv layer from {self.cfg.student.in_chans} -> {self.cfg.student.sar_in_chans} channels")
+                    patch_first_conv(self.gram_teacher.backbone,
+                                     new_in_channels=self.cfg.student.sar_in_chans,
+                                     default_in_channels=self.cfg.student.in_chans,
                                      pretrained=True)
                 self.gram_teacher_initialized = True
             else:
@@ -341,12 +341,16 @@ class SSLMetaArch(nn.Module):
                 keys_not_sharded=["backbone.rope_embed.periods"] + list(self.cfg.student.resume_from_teacher_chkpt_keys_not_sharded),
                 process_group=distributed.get_process_subgroup(),
             )
-            if self.cfg.student.in_chans != 3:
-                logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
-                patch_first_conv(self.student.backbone, 
-                                new_in_channels=self.cfg.student.in_chans,
-                                default_in_channels=3,
+            if self.cfg.student.sar_in_chans:
+                logger.info(f"Patching patch embed conv layer from {self.cfg.student.in_chans} -> {self.cfg.student.sar_in_chans} channels")
+                patch_first_conv(self.student.backbone,
+                                new_in_channels=self.cfg.student.sar_in_chans,
+                                default_in_channels=self.cfg.student.in_chans,
                                 pretrained=True)
+                patch_first_conv(self.model_ema.backbone,
+                                new_in_channels=self.cfg.student.sar_in_chans,
+                                default_in_channels=self.cfg.student.in_chans,
+                                pretrained=False)
             self.model_ema.load_state_dict(self.student.state_dict())
         if self.cfg.distillation.enabled:
             if self.cfg.distillation.checkpoint_path != "ignore":
@@ -358,11 +362,11 @@ class SSLMetaArch(nn.Module):
                     keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                     process_group=distributed.get_default_process_group(),
                 )
-                if self.cfg.student.in_chans != 3:
-                    logger.info(f"Patching patch embed conv layer from 3 -> {self.cfg.student.in_chans} channels")
-                    patch_first_conv(self.teacher.backbone, 
-                                     new_in_channels=self.cfg.student.in_chans,
-                                     default_in_channels=3,
+                if self.cfg.student.sar_in_chans:
+                    logger.info(f"Patching patch embed conv layer from {self.cfg.student.in_chans} -> {self.cfg.student.sar_in_chans} channels")
+                    patch_first_conv(self.teacher.backbone,
+                                     new_in_channels=self.cfg.student.sar_in_chans,
+                                     default_in_channels=self.cfg.student.in_chans,
                                      pretrained=True)
             else:
                 logger.info("Init teacher to distil from, used for testing purpose only")
