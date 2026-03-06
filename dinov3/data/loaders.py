@@ -8,8 +8,13 @@ from enum import Enum
 from typing import Any, Callable, List, Optional, TypeVar
 
 import torch
+from PIL import Image
 from torch.utils.data import Sampler
 from torchvision.datasets import ImageFolder
+
+
+def _grayscale_loader(path: str) -> Image.Image:
+    return Image.open(path).convert("L")
 
 from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
@@ -87,6 +92,7 @@ def make_dataset(
     transform: Optional[Callable] = None,
     target_transform: Optional[Callable] = None,
     transforms: Optional[Callable] = None,
+    in_chans: int = 3,
 ):
     """
     Creates a dataset with the specified parameters.
@@ -96,6 +102,9 @@ def make_dataset(
         transform: A transform to apply to images.
         target_transform: A transform to apply to targets.
         transforms: A transform to apply to both images and targets.
+        in_chans: Number of input channels expected by the model. When 1, images
+            are loaded as grayscale (PIL mode "L") so pixel values are never
+            altered by an RGB conversion.
 
     Returns:
         The created dataset.
@@ -104,7 +113,9 @@ def make_dataset(
 
     class_, kwargs = _parse_dataset_str(dataset_str)
     if class_ is ImageFolder:
-        dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
+        loader = _grayscale_loader if in_chans == 1 else None
+        extra = {"loader": loader} if loader is not None else {}
+        dataset = class_(transform=transform, target_transform=target_transform, **extra, **kwargs)
     else:
         dataset = class_(transform=transform, target_transform=target_transform, transforms=transforms, **kwargs)
 
