@@ -275,7 +275,7 @@ def init_fsdp_model_from_checkpoint(
     if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
         if ("sat" in Path(checkpoint_path).name):
-            raw = torch.load(checkpoint_path, map_location="cpu")
+            raw = torch.load(checkpoint_path, map_location="cpu", strict=False)
             chkpt = {f"backbone.{k}": v for k, v in raw.items()}
         else:
             chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
