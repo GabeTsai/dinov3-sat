@@ -334,7 +334,7 @@ class SSLMetaArch(nn.Module):
                 skip_load_keys=["dino_loss.center", "ibot_patch_loss.center"] + list(self.cfg.student.resume_from_teacher_chkpt_skip_load_keys),
                 keys_not_sharded=["backbone.rope_embed.periods"] + list(self.cfg.student.resume_from_teacher_chkpt_keys_not_sharded),
                 process_group=distributed.get_process_subgroup(),
-                patch_embed_in_chans=self.cfg.student.sar_in_chans or None,
+                patch_embed_in_chans=self.cfg.student.in_chans or None,
             )
             self.model_ema.load_state_dict(self.student.state_dict())
         if self.cfg.distillation.enabled:
@@ -758,6 +758,7 @@ class SSLMetaArch(nn.Module):
             local_crops_subset_of_global_crops=cfg.crops.localcrops_subset_of_globalcrops,
             share_color_jitter=cfg.crops.share_color_jitter,
             horizontal_flips=cfg.crops.horizontal_flips,
+            gaussian_blur=cfg.crops.gaussian_blur,
             mean=cfg.crops.rgb_mean,
             std=cfg.crops.rgb_std,
         )

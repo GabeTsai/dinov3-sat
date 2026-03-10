@@ -4,6 +4,7 @@
 # the terms of the DINOv3 License Agreement.
 
 import logging
+import random
 
 import numpy as np
 import torch
@@ -14,6 +15,28 @@ from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, 
 
 logger = logging.getLogger("dinov3")
 
+class RandomD4: 
+    """
+    Torch-ified version of RandomD4 from Albumentations.
+    """
+    def __call__(self, x):
+        k = random.randint(0, 7)
+        if k == 0:   # e: identity
+            return x
+        elif k == 1: # r90
+            return torch.rot90(x, 1, [-2, -1])
+        elif k == 2: # r180
+            return torch.rot90(x, 2, [-2, -1])
+        elif k == 3: # r270
+            return torch.rot90(x, 3, [-2, -1])
+        elif k == 4: # v: vertical flip
+            return torch.flip(x, [-2])
+        elif k == 5: # h: horizontal flip
+            return torch.flip(x, [-1])
+        elif k == 6: # t: transpose (diagonal reflection)
+            return x.transpose(-2, -1)
+        else:        # hvt: anti-diagonal reflection = t(r180)
+            return torch.rot90(x, 2, [-2, -1]).transpose(-2, -1)
 
 class DataAugmentationDINO(object):
     def __init__(
@@ -30,6 +53,7 @@ class DataAugmentationDINO(object):
         patch_size=16,
         share_color_jitter=False,
         horizontal_flips=True,
+        gaussian_blur=True,
         mean=IMAGENET_DEFAULT_MEAN,
         std=IMAGENET_DEFAULT_STD,
     ):
@@ -75,7 +99,6 @@ class DataAugmentationDINO(object):
                     scale=global_crops_scale,
                     interpolation=v2.InterpolationMode.BICUBIC,
                 ),
-                v2.RandomHorizontalFlip(p=0.5 if horizontal_flips else 0.0),
             ]
         )
 
@@ -114,31 +137,44 @@ class DataAugmentationDINO(object):
                     scale=local_crops_scale,
                     interpolation=v2.InterpolationMode.BICUBIC,
                 ),
-                v2.RandomHorizontalFlip(p=0.5 if horizontal_flips else 0.0),
             ]
         )
 
-        # color distortions / blurring
-        color_jittering = v2.Compose(
+        color_jittering_strong = v2.Compose(
+                [
+                    v2.RandomApply(
+                        [v2.ColorJitter(brightness=0.15, contrast=0.2)],
+                        p=0.8,
+                    ),
+                ]
+            )
+
+        color_jittering_weak = v2.Compose(
             [
                 v2.RandomApply(
-                    [v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                    p=0.8,
+                    [v2.ColorJitter(brightness=0.1, contrast=0.15)],
+                    p=0.5,
                 ),
-                v2.RandomGrayscale(p=0.2),
             ]
         )
 
-        global_transfo1_extra = GaussianBlur(p=1.0)
+        # apply gaussian blue like defaults in DINOv3
+        if gaussian_blur:
+            global_transfo1_extra = GaussianBlur(p=1.0)
 
-        global_transfo2_extra = v2.Compose(
-            [
-                GaussianBlur(p=0.1),
-                v2.RandomSolarize(threshold=128, p=0.2),
-            ]
-        )
+            global_transfo2_extra = v2.Compose(
+                [
+                    GaussianBlur(p=0.1),
+                    v2.RandomSolarize(threshold=128, p=0.2),
+                ]
+            )
 
-        local_transfo_extra = GaussianBlur(p=0.5)
+            local_transfo_extra = GaussianBlur(p=0.5)
+        else: 
+            # otherwise, use color jittering. Since a SAR backbone
+            # needs to see fine details, Gaussian blur may be unnecessary for this domain.
+            global_transfo1_extra, local_transfo_extra = color_jittering_strong
+            global_transfo2_extra = color_jittering_weak
 
         # normalization
         self.normalize = v2.Compose(
@@ -150,18 +186,18 @@ class DataAugmentationDINO(object):
         )
 
         if self.share_color_jitter:
-            self.color_jittering = color_jittering
-            self.global_transfo1 = v2.Compose([resize_global, global_transfo1_extra, self.normalize])
-            self.global_transfo2 = v2.Compose([resize_global, global_transfo2_extra, self.normalize])
-            self.local_transfo = v2.Compose([local_transfo_extra, self.normalize])
+            self.color_jittering = color_jittering_strong
+            self.global_transfo1 = v2.Compose([resize_global, self.normalize, RandomD4()])
+            self.global_transfo2 = v2.Compose([resize_global, self.normalize, RandomD4()])
+            self.local_transfo = v2.Compose([self.normalize, RandomD4()])
         else:
             self.global_transfo1 = v2.Compose(
-                [resize_global, color_jittering, global_transfo1_extra, self.normalize]
+                [resize_global, global_transfo1_extra, self.normalize, RandomD4()]
             )
             self.global_transfo2 = v2.Compose(
-                [resize_global, color_jittering, global_transfo2_extra, self.normalize]
+                [resize_global, global_transfo2_extra, self.normalize, RandomD4()]
             )
-            self.local_transfo = v2.Compose([color_jittering, local_transfo_extra, self.normalize])
+            self.local_transfo = v2.Compose([local_transfo_extra, self.normalize, RandomD4()])
 
     def __call__(self, image):
         output = {}
