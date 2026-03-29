@@ -158,22 +158,17 @@ class DataAugmentationDINO(object):
             ]
         )
 
-        # apply gaussian blue like defaults in DINOv3
+        # apply gaussian blur like defaults in DINOv3
         if gaussian_blur:
-            global_transfo1_extra = GaussianBlur(p=1.0)
+            global_transfo1_extra = v2.Compose([color_jittering_strong, GaussianBlur(p=1.0)])
 
-            global_transfo2_extra = v2.Compose(
-                [
-                    GaussianBlur(p=0.1),
-                    v2.RandomSolarize(threshold=128, p=0.2),
-                ]
-            )
+            global_transfo2_extra = v2.Compose([color_jittering_strong, GaussianBlur(p=0.1)])
 
-            local_transfo_extra = GaussianBlur(p=0.5)
+            local_transfo_extra = v2.Compose([color_jittering_strong, GaussianBlur(p=0.5)])
         else: 
-            # otherwise, use color jittering. Since a SAR backbone
+            # otherwise, just use color jittering. Since a SAR backbone
             # needs to see fine details, Gaussian blur may be unnecessary for this domain.
-            global_transfo1_extra, local_transfo_extra = color_jittering_strong
+            global_transfo1_extra, local_transfo_extra = color_jittering_strong, color_jittering_strong
             global_transfo2_extra = color_jittering_weak
 
         # normalization

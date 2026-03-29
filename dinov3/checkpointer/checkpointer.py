@@ -360,3 +360,23 @@ def cleanup_checkpoint(ckpt_dir: str, checkpoint_retention_policy: CheckpointRet
             logger.info(f"Deleted: {checkpoint}")
         except Exception:
             logger.exception(f"Failed to delete: {checkpoint}")
+
+def distributed_checkpoint_to_state_dict(checkpoint_path: str | Path) -> dict:
+    """
+    Load sharded checkpoint into full state dict. Credit to Pytorch Ligthing: 
+    https://github.com/Lightning-AI/pytorch-lightning/blob/master/src/lightning/fabric/utilities/load.py#L240 
+    """
+
+    from torch.distributed.checkpoint import FileSystemReader
+    from torch.distributed.checkpoint.format_utils import _EmptyStateDictLoadPlanner
+    from torch.distributed.checkpoint.state_dict_loader import _load_state_dict
+
+    state_dict = {}
+    _load_state_dict(
+        state_dict, 
+        storage_reader = FileSystemReader(checkpoint_path), # execute reads/writes into dest tensors
+        planner = _EmptyStateDictLoadPlanner(), # allocate and init all model tensors to empty
+        no_dist = True # use one process to load checkpoint or else OOM risk
+    )
+
+    return state_dict
