@@ -407,9 +407,10 @@ def do_train(cfg, model, resume=False):
             model,
             dont_save=[k for k, _ in model.state_dict().items() if k.startswith("teacher")],
         )
-    model.init_weights()
+    last_checkpoint_dir = find_latest_checkpoint(ckpt_dir) if resume else None
+    model.init_weights(resume_ckpt_dir=last_checkpoint_dir)
     start_iter = 0
-    if resume and (last_checkpoint_dir := find_latest_checkpoint(ckpt_dir)):
+    if last_checkpoint_dir is not None:
         logger.info(f"Checkpoint found {last_checkpoint_dir}")
         start_iter = (
             load_checkpoint(

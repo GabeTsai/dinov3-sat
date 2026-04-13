@@ -297,7 +297,7 @@ class SSLMetaArch(nn.Module):
         )
         self.teacher = nn.ModuleDict(teacher_model_dict)
 
-    def init_weights(self) -> None:
+    def init_weights(self, resume_ckpt_dir=None) -> None:
         # All weights are set to `nan` to ensure we initialize everything explicitly
         self.student.backbone.init_weights()
         self.student.dino_head.init_weights()
@@ -306,7 +306,10 @@ class SSLMetaArch(nn.Module):
         self.ibot_patch_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
-            if self.gram_ckpt is not None:
+            if resume_ckpt_dir is not None:
+                logger.info(f"Skipping gram.ckpt load; gram teacher will be restored from resume checkpoint {resume_ckpt_dir}")
+                self.gram_teacher_initialized = True
+            elif self.gram_ckpt is not None:
                 logger.info(f"Loading pretrained weights from {self.gram_ckpt}")
                 init_fsdp_model_from_checkpoint(
                     self.gram_teacher,
