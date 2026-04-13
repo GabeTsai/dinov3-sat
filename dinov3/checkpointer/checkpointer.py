@@ -283,7 +283,18 @@ def init_fsdp_model_from_checkpoint(
             if patch_embed_in_chans is not None:
                 chkpt = convert_patch_embed_channels(chkpt, target_in_chans=patch_embed_in_chans)
         else:
-            chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
+            raw = torch.load(checkpoint_path, map_location="cpu")
+            if "teacher" in raw:
+                chkpt = raw["teacher"]
+            else:
+                # Full model state dict format (e.g. from distributed_checkpoint_to_state_dict):
+                chkpt = {k.removeprefix("teacher."): v for k, v in raw.items() if k.startswith("teacher.")}
+                if not chkpt:
+                    raise KeyError(
+                        f"Could not find teacher weights in checkpoint {checkpoint_path}. "
+                        f"Expected either a 'teacher' key or keys prefixed with 'teacher.'. "
+                        f"Found top-level keys: {list(raw.keys())[:10]}"
+                    )
         from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
         if process_group is None:
