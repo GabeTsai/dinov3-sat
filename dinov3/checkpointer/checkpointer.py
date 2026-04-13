@@ -277,24 +277,25 @@ def init_fsdp_model_from_checkpoint(
 ):
     if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
-        if ("sat" in Path(checkpoint_path).name):
-            raw = torch.load(checkpoint_path, map_location="cpu")
+        raw = torch.load(checkpoint_path, map_location="cpu")
+        if ("sat" in Path(checkpoint_path).name or 
+            any(k.startswith(("cls_token", "patch_embed", "blocks.", "rope_embed", "norm")) for k in raw)):
             chkpt = {f"backbone.{k}": v for k, v in raw.items()}
             if patch_embed_in_chans is not None:
                 chkpt = convert_patch_embed_channels(chkpt, target_in_chans=patch_embed_in_chans)
         else:
-            raw = torch.load(checkpoint_path, map_location="cpu")
             if "teacher" in raw:
+                # Eval checkpoint format: {"teacher": state_dict}
                 chkpt = raw["teacher"]
-            else:
-                # Full model state dict format (e.g. from distributed_checkpoint_to_state_dict):
+            elif any(k.startswith("teacher.") for k in raw):
+                # distributed_checkpoint_to_state_dict output with teacher/student prefixes
                 chkpt = {k.removeprefix("teacher."): v for k, v in raw.items() if k.startswith("teacher.")}
-                if not chkpt:
-                    raise KeyError(
-                        f"Could not find teacher weights in checkpoint {checkpoint_path}. "
-                        f"Expected either a 'teacher' key or keys prefixed with 'teacher.'. "
-                        f"Found top-level keys: {list(raw.keys())[:10]}"
-                    )
+            else:
+                raise KeyError(
+                    f"Could not find teacher weights in checkpoint {checkpoint_path}. "
+                    f"Expected a 'teacher' key, keys prefixed with 'teacher.', or raw backbone keys. "
+                    f"Found top-level keys: {list(raw.keys())[:10]}"
+                )
         from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
         if process_group is None:
