@@ -5,7 +5,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-from dinov3.checkpointer.checkpointer import distributed_checkpoint_to_state_dict
+from dinov3.checkpointer.checkpointer import extract_backbone_dist_state_dict
 from dinov3.models import build_model_from_cfg
 from PIL import Image
 from omegaconf import OmegaConf
@@ -31,13 +31,7 @@ def load_teacher_backbone(checkpoint_path: str, cfg):
     Load the EMA teacher backbone from a DCP training checkpoint.
     """
     backbone, _ = build_model_from_cfg(cfg, only_teacher=True)
-
-    full_state = distributed_checkpoint_to_state_dict(checkpoint_path)["model"]
-    teacher_backbone_state = {
-        k.removeprefix("teacher.backbone."): v
-        for k, v in full_state.items()
-        if k.startswith("teacher.backbone.")
-    }
+    teacher_backbone_state = extract_backbone_dist_state_dict(checkpoint_path, "teacher")
 
     # assign=True to replace meta param objects with actual tensors in memory
     backbone.load_state_dict(teacher_backbone_state, strict=True, assign=True)
@@ -95,6 +89,7 @@ def main():
     patch_size = cfg.student.patch_size  # 16 for ViT-L SAR model
 
     model = load_teacher_backbone(args.checkpoint, cfg)
+    torch.save(model.state_dict(), Path(args.checkpoint) / "model.pth")
     pca_map = compute_pca(model, args.image, resize_size=RESIZE_SIZE, patch_size=patch_size)
 
     h, w = pca_map.shape[:2]

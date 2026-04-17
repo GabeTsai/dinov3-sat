@@ -373,6 +373,7 @@ def cleanup_checkpoint(ckpt_dir: str, checkpoint_retention_policy: CheckpointRet
         except Exception:
             logger.exception(f"Failed to delete: {checkpoint}")
 
+
 def distributed_checkpoint_to_state_dict(checkpoint_path: str | Path) -> dict:
     """
     Load sharded checkpoint into full state dict. Credit to Pytorch Ligthing: 
@@ -392,3 +393,43 @@ def distributed_checkpoint_to_state_dict(checkpoint_path: str | Path) -> dict:
     )
 
     return state_dict
+
+
+def extract_prefixed_state_dict(
+    checkpoint_path: str | Path,
+    prefix: str,
+    top_level_key: str = "model",
+) -> dict[str, torch.Tensor]:
+    """
+    Extract a plain state dict from a distributed checkpoint by filtering on a prefix.
+    """
+    full_state = distributed_checkpoint_to_state_dict(checkpoint_path)[top_level_key]
+    return {
+        k.removeprefix(prefix): v
+        for k, v in full_state.items()
+        if k.startswith(prefix)
+    }
+
+
+def extract_backbone_dist_state_dict(
+    checkpoint_path: str | Path,
+    backbone_prefix: str,
+    top_level_key: str = "model",
+) -> dict[str, torch.Tensor]:
+    """
+    Extract a backbone-only state dict from a distributed checkpoint.
+    """
+    return extract_prefixed_state_dict(
+        checkpoint_path,
+        prefix=f"{backbone_prefix}.backbone.",
+        top_level_key=top_level_key,
+    )
+
+
+def save_dist_ckpt_backbone_to_pth(
+    dist_ckpt_path: str | Path,
+    backbone_prefix: str, 
+    output_path: str | Path
+):
+    backbone_state_dict = extract_backbone_dist_state_dict(dist_ckpt_path, backbone_prefix)
+    torch.save(backbone_state_dict, output_path)

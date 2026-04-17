@@ -15,4 +15,5 @@ from .checkpointer import (
     load_checkpoint,
     register_dont_save_hooks,
     save_checkpoint,
+    save_dist_ckpt_backbone_to_pth,
 )
