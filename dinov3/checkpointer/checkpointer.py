@@ -40,6 +40,9 @@ import torch.distributed.checkpoint.state_dict as dcpsd
 from torch.distributed.checkpoint.stateful import Stateful
 
 from dinov3.layers.patch_embed import convert_patch_embed_channels
+from dinov3.configs.config import get_default_config
+from dinov3.models import build_model_from_cfg
+from omegaconf import OmegaConf
 
 logger = logging.getLogger("dinov3")
 
@@ -429,7 +432,10 @@ def extract_backbone_dist_state_dict(
 def save_dist_ckpt_backbone_to_pth(
     dist_ckpt_path: str | Path,
     backbone_prefix: str, 
-    output_path: str | Path
+    output_path: str | Path,
+    model_config_path: str | Path
 ):
-    backbone_state_dict = extract_backbone_dist_state_dict(dist_ckpt_path, backbone_prefix)
-    torch.save(backbone_state_dict, output_path)
+    cfg = OmegaConf.merge(get_default_config(), OmegaConf.load(model_config_path))
+    backbone, _ = build_model_from_cfg(cfg, only_teacher=True)
+    backbone.load_state_dict(extract_backbone_dist_state_dict(dist_ckpt_path, backbone_prefix), strict=True, assign=True)
+    torch.save(backbone.state_dict(), output_path)
