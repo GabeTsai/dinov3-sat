@@ -24,6 +24,7 @@ from dinov3.checkpointer import (
     keep_checkpoint_copy,
     keep_last_n_checkpoints,
     load_checkpoint,
+    load_checkpoint_metadata,
     register_dont_save_hooks,
     save_checkpoint,
 )
@@ -37,7 +38,11 @@ from dinov3.data import (
     CombinedDataLoader,
 )
 from dinov3.logging import MetricLogger, setup_logging
-from dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosine_decay
+from dinov3.train.cosine_lr_scheduler import (
+    CosineScheduler,
+    linear_warmup_cosine_decay,
+    resolve_schedule_total_iterations,
+)
 from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
 from dinov3.train.ssl_meta_arch import SSLMetaArch
 
@@ -49,6 +54,71 @@ torch.backends.cuda.matmul.allow_tf32 = True  # pytorch 1.12 sets this to false 
 torch.backends.cudnn.benchmark = False  # True
 
 logger = logging.getLogger("dinov3")
+SCHEDULE_STATE_FILENAME = "schedule_state.json"
+
+
+def get_schedule_state(cfg) -> dict[str, int]:
+    total_iterations = resolve_schedule_total_iterations(
+        iter_per_epoch=cfg.train.OFFICIAL_EPOCH_LENGTH,
+        optim_epochs=cfg.optim.epochs,
+        schedule_epochs=cfg.optim.get("schedule_epochs"),
+        schedule_total_iterations=cfg.optim.get("schedule_total_iterations"),
+    )
+    schedule_epochs = cfg.optim.get("schedule_epochs")
+    if schedule_epochs is None:
+        schedule_epochs = cfg.optim.epochs
+    return {
+        "schedule_epochs": int(schedule_epochs),
+        "schedule_total_iterations": int(total_iterations),
+    }
+
+
+def persist_schedule_state(output_dir: str | os.PathLike[str], schedule_state: dict[str, int]) -> None:
+    schedule_state_path = Path(output_dir) / SCHEDULE_STATE_FILENAME
+    schedule_state_path.write_text(json.dumps(schedule_state))
+
+
+def load_saved_schedule_state(output_dir: str | os.PathLike[str]) -> dict[str, int] | None:
+    output_dir = Path(output_dir).expanduser()
+    schedule_state_path = output_dir / SCHEDULE_STATE_FILENAME
+    if schedule_state_path.exists():
+        schedule_state = json.loads(schedule_state_path.read_text())
+        if "schedule_total_iterations" in schedule_state:
+            return schedule_state
+
+    latest_checkpoint = find_latest_checkpoint(output_dir / "ckpt")
+    if latest_checkpoint is not None:
+        schedule_state = load_checkpoint_metadata(
+            latest_checkpoint,
+            "schedule_epochs",
+            "schedule_total_iterations",
+        )
+        if schedule_state.get("schedule_total_iterations") is not None:
+            return {k: int(v) for k, v in schedule_state.items() if v is not None}
+
+    config_path = output_dir / "config.yaml"
+    if not config_path.exists():
+        return None
+
+    previous_cfg = OmegaConf.load(config_path)
+    previous_schedule_total_iterations = previous_cfg.optim.get("schedule_total_iterations")
+    if previous_schedule_total_iterations is None:
+        previous_schedule_total_iterations = (
+            previous_cfg.optim.get("schedule_epochs", previous_cfg.optim.epochs) * previous_cfg.train.OFFICIAL_EPOCH_LENGTH
+        )
+    return {
+        "schedule_epochs": int(previous_cfg.optim.get("schedule_epochs", previous_cfg.optim.epochs)),
+        "schedule_total_iterations": int(previous_schedule_total_iterations),
+    }
+
+
+def apply_saved_schedule_state(cfg, schedule_state: dict[str, int] | None) -> None:
+    if not schedule_state:
+        return
+    if cfg.optim.get("schedule_epochs") is None and schedule_state.get("schedule_epochs") is not None:
+        cfg.optim.schedule_epochs = int(schedule_state["schedule_epochs"])
+    if cfg.optim.get("schedule_total_iterations") is None and schedule_state.get("schedule_total_iterations") is not None:
+        cfg.optim.schedule_total_iterations = int(schedule_state["schedule_total_iterations"])
 
 
 def get_args_parser(add_help: bool = True):
@@ -112,10 +182,16 @@ def build_schedulers(cfg):
         return build_schedulers_v2(cfg)
 
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
+    schedule_total_iterations = resolve_schedule_total_iterations(
+        iter_per_epoch=OFFICIAL_EPOCH_LENGTH,
+        optim_epochs=cfg.optim.epochs,
+        schedule_epochs=cfg.optim.get("schedule_epochs"),
+        schedule_total_iterations=cfg.optim.get("schedule_total_iterations"),
+    )
     lr = dict(
         base_value=cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=schedule_total_iterations,
         warmup_iters=cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH,
         start_warmup_value=0,
         trunc_extra=cfg.optim["schedule_trunc_extra"],
@@ -123,13 +199,13 @@ def build_schedulers(cfg):
     wd = dict(
         base_value=cfg.optim["weight_decay"],
         final_value=cfg.optim["weight_decay_end"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=schedule_total_iterations,
         trunc_extra=cfg.optim["schedule_trunc_extra"],
     )
     momentum = dict(
         base_value=cfg.teacher["momentum_teacher"],
         final_value=cfg.teacher["final_momentum_teacher"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=schedule_total_iterations,
         trunc_extra=cfg.optim["schedule_trunc_extra"],
     )
     teacher_temp = dict(
@@ -161,7 +237,12 @@ def build_schedulers(cfg):
 
 def build_schedulers_v2(cfg):
     iter_per_epoch = cfg.train.OFFICIAL_EPOCH_LENGTH
-    total_iterations = cfg.train.OFFICIAL_EPOCH_LENGTH * cfg.optim.epochs
+    total_iterations = resolve_schedule_total_iterations(
+        iter_per_epoch=iter_per_epoch,
+        optim_epochs=cfg.optim.epochs,
+        schedule_epochs=cfg.optim.get("schedule_epochs"),
+        schedule_total_iterations=cfg.optim.get("schedule_total_iterations"),
+    )
     logger.info(f"Total training iterations {total_iterations}")
 
     # LR scaling rules
@@ -464,6 +545,13 @@ def do_train(cfg, model, resume=False):
         )
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
+    schedule_state = get_schedule_state(cfg)
+    if schedule_state["schedule_total_iterations"] != max_iter:
+        logger.info(
+            "Preserving original schedule horizon at %d iterations while training to %d iterations",
+            schedule_state["schedule_total_iterations"],
+            max_iter,
+        )
     if cfg.multidistillation.enabled:
         global_batch_size = cfg.multidistillation.global_batch_size
     else:
@@ -626,6 +714,7 @@ def do_train(cfg, model, resume=False):
                 optimizer=optimizer,
                 overwrite=True,
                 process_group=process_subgroup,
+                **schedule_state,
             )
             if distributed.is_subgroup_main_process():
                 keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
@@ -651,6 +740,7 @@ def main(argv=None):
     else:
         args = get_args_parser().parse_args(argv[1:])
         args.output_dir = sys.argv[1]
+    saved_schedule_state = None
     if args.multi_distillation:
         print("performing multidistillation run")
         cfg = setup_multidistillation(args)
@@ -659,7 +749,11 @@ def main(argv=None):
         assert cfg.MODEL.META_ARCHITECTURE == "MultiDistillationMetaArch"
     else:
         setup_job(output_dir=args.output_dir, seed=args.seed)
+        if not args.no_resume and not args.eval_only:
+            saved_schedule_state = load_saved_schedule_state(args.output_dir)
         cfg = setup_config(args, strict_cfg=False)
+        apply_saved_schedule_state(cfg, saved_schedule_state)
+        persist_schedule_state(args.output_dir, get_schedule_state(cfg))
         logger.info(cfg)
         setup_logging(
             output=os.path.join(os.path.abspath(args.output_dir), "nan_logs"),

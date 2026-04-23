@@ -23,6 +23,7 @@ from dinov3.train.cosine_lr_scheduler import (
     build_gram_loss_weight_schedule,
     get_gram_loss_schedule_iteration,
     linear_warmup_cosine_decay,
+    resolve_schedule_total_iterations,
 )
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
@@ -200,6 +201,12 @@ class SSLMetaArch(nn.Module):
                     optim_epochs=cfg.optim.epochs,
                     it_first_update=cfg.gram.it_first_update,
                     relative_to_first_update=self.gram_loss_schedule_relative_to_first_update,
+                    schedule_total_iterations=resolve_schedule_total_iterations(
+                        iter_per_epoch=iter_per_epoch,
+                        optim_epochs=cfg.optim.epochs,
+                        schedule_epochs=cfg.optim.get("schedule_epochs"),
+                        schedule_total_iterations=cfg.optim.get("schedule_total_iterations"),
+                    ),
                 )
                 logger.info(f"Applying gram loss weight schedule instead of `cfg.gram.loss_weight`: {schedule_cfg}")
             else:

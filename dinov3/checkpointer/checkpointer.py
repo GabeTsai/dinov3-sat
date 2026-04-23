@@ -171,6 +171,18 @@ def load_checkpoint(
     return iteration
 
 
+def load_checkpoint_metadata(ckpt_dir: str | Path, *keys: str) -> dict[str, int | None]:
+    """Load non-model metadata entries from a distributed checkpoint."""
+    ckpt_dir = Path(ckpt_dir)
+    to_load = {key: None for key in keys}
+    dcp.load(
+        to_load,
+        storage_reader=dcpfs.FileSystemReader(ckpt_dir),
+        planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=True),
+    )
+    return to_load
+
+
 def checkpoint_contains_state_key_prefix(ckpt_dir: str | Path, prefix: str) -> bool:
     """Return whether a distributed checkpoint metadata entry starts with `prefix`."""
     ckpt_dir = Path(ckpt_dir)

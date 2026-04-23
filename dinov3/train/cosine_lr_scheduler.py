@@ -10,6 +10,18 @@ import numpy as np
 logger = logging.getLogger("dinov3")
 
 
+def resolve_schedule_total_iterations(
+    iter_per_epoch: int,
+    optim_epochs: int,
+    schedule_epochs: int | None = None,
+    schedule_total_iterations: int | None = None,
+) -> int:
+    if schedule_total_iterations is not None:
+        return int(schedule_total_iterations)
+    effective_epochs = optim_epochs if schedule_epochs is None else schedule_epochs
+    return int(iter_per_epoch * effective_epochs)
+
+
 class CosineScheduler(object):
     def __init__(
         self,
@@ -101,8 +113,15 @@ def build_gram_loss_weight_schedule(
     optim_epochs: int,
     it_first_update: int,
     relative_to_first_update: bool,
+    schedule_epochs: int | None = None,
+    schedule_total_iterations: int | None = None,
 ) -> np.ndarray:
-    total_iterations = iter_per_epoch * optim_epochs
+    total_iterations = resolve_schedule_total_iterations(
+        iter_per_epoch=iter_per_epoch,
+        optim_epochs=optim_epochs,
+        schedule_epochs=schedule_epochs,
+        schedule_total_iterations=schedule_total_iterations,
+    )
     if relative_to_first_update:
         total_iterations = max(1, total_iterations - it_first_update)
     return linear_warmup_cosine_decay(

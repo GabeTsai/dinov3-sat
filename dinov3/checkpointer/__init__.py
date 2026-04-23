@@ -10,6 +10,7 @@ from .checkpointer import (
     find_all_checkpoints,
     find_latest_checkpoint,
     init_fsdp_model_from_checkpoint,
+    load_checkpoint_metadata,
     init_model_from_checkpoint_for_evals,
     keep_checkpoint_copy,
     keep_last_n_checkpoints,
