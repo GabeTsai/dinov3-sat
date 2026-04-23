@@ -83,3 +83,33 @@ def linear_warmup_cosine_decay(
     assert remaining_iterations >= 0
     constant = np.full((remaining_iterations,), fill_value=end)
     return np.concatenate([linear, cosine, constant])
+
+
+def get_gram_loss_schedule_iteration(
+    iteration: int,
+    it_first_update: int,
+    relative_to_first_update: bool,
+) -> int:
+    if not relative_to_first_update:
+        return iteration
+    return max(0, iteration - it_first_update)
+
+
+def build_gram_loss_weight_schedule(
+    schedule_cfg,
+    iter_per_epoch: int,
+    optim_epochs: int,
+    it_first_update: int,
+    relative_to_first_update: bool,
+) -> np.ndarray:
+    total_iterations = iter_per_epoch * optim_epochs
+    if relative_to_first_update:
+        total_iterations = max(1, total_iterations - it_first_update)
+    return linear_warmup_cosine_decay(
+        start=schedule_cfg.start,
+        peak=schedule_cfg.peak,
+        end=schedule_cfg.end,
+        warmup_iterations=iter_per_epoch * schedule_cfg.warmup_epochs,
+        total_iterations=total_iterations,
+        cosine_iterations=(iter_per_epoch * schedule_cfg.cosine_epochs if "cosine_epochs" in schedule_cfg else None),
+    )

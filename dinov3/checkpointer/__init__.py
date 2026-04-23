@@ -5,6 +5,7 @@
 
 from .checkpointer import (
     CheckpointRetentionPolicy,
+    checkpoint_contains_state_key_prefix,
     cleanup_checkpoint,
     find_all_checkpoints,
     find_latest_checkpoint,

@@ -12,14 +12,18 @@ from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 import dinov3.distributed as distributed
-from dinov3.checkpointer import init_fsdp_model_from_checkpoint
+from dinov3.checkpointer import checkpoint_contains_state_key_prefix, init_fsdp_model_from_checkpoint
 from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
 from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
 from dinov3.models import build_model_from_cfg
-from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
+from dinov3.train.cosine_lr_scheduler import (
+    build_gram_loss_weight_schedule,
+    get_gram_loss_schedule_iteration,
+    linear_warmup_cosine_decay,
+)
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
 
@@ -184,25 +188,25 @@ class SSLMetaArch(nn.Module):
                 self.gram_teacher = None
 
             self.gram_loss_weight = self.cfg.gram.loss_weight
+            self.gram_loss_schedule_relative_to_first_update = self.cfg.gram.get(
+                "loss_weight_schedule_relative_to_first_update", False
+            )
             if self.cfg.gram.get("loss_weight_schedule"):
                 iter_per_epoch = cfg.train.OFFICIAL_EPOCH_LENGTH
-                total_iterations = iter_per_epoch * cfg.optim.epochs
                 schedule_cfg = self.cfg.gram.loss_weight_schedule
-                self.gram_loss_schedule = linear_warmup_cosine_decay(
-                    start=schedule_cfg.start,
-                    peak=schedule_cfg.peak,
-                    end=schedule_cfg.end,
-                    warmup_iterations=iter_per_epoch * schedule_cfg.warmup_epochs,
-                    total_iterations=total_iterations,
-                    cosine_iterations=(
-                        iter_per_epoch * schedule_cfg.cosine_epochs if "cosine_epochs" in schedule_cfg else None
-                    ),
+                self.gram_loss_schedule = build_gram_loss_weight_schedule(
+                    schedule_cfg,
+                    iter_per_epoch=iter_per_epoch,
+                    optim_epochs=cfg.optim.epochs,
+                    it_first_update=cfg.gram.it_first_update,
+                    relative_to_first_update=self.gram_loss_schedule_relative_to_first_update,
                 )
                 logger.info(f"Applying gram loss weight schedule instead of `cfg.gram.loss_weight`: {schedule_cfg}")
             else:
                 self.gram_loss_schedule = None
             self.gram_ema_teacher = self.cfg.gram.ema_teacher  # If true use the EMA_teacher as gram_teacher
             self.gram_ckpt = self.cfg.gram.ckpt  # Checkpoint to the first gram teacher model
+            self.gram_has_ckpt = self.gram_ckpt is not None and self.gram_ckpt != "ignore"
             self.gram_img_level = self.cfg.gram.img_level  # Apply the loss on the image, if false on the batch
             self.gram_tokens_used = self.cfg.gram.tokens_used  # Any value in ["all", "masked", "unmasked"]
             # Update the teacher frequently
@@ -215,11 +219,16 @@ class SSLMetaArch(nn.Module):
             self.gram_compute_stats = self.cfg.gram.compute_stats  # whether to compute auxiliary stats
             self.gram_params_lists = None
 
-            if self.gram_ema_teacher and self.gram_ckpt is not None:
+            if self.gram_ema_teacher and self.gram_has_ckpt:
                 raise ValueError(
                     "Cannot use both `gram.ema_teacher` and `gram.ckpt` at the same time. Please set one of them to False."
                 )
-            if self.gram_ckpt is None and self.gram_it_load_ema_teacher < 0:
+            can_initialize_gram_from_first_update = (
+                self.gram_loss_schedule_relative_to_first_update
+                and self.gram_rep_update
+                and self.gram_it_first_update >= 0
+            )
+            if not self.gram_has_ckpt and self.gram_it_load_ema_teacher < 0 and not can_initialize_gram_from_first_update:
                 raise ValueError(
                     "If no gram checkpoint is provided, `gram.it_load_ema_teacher` must be set to a non-negative value."
                 )
@@ -234,6 +243,10 @@ class SSLMetaArch(nn.Module):
             logger.info(f"OPTIONS -- GRAM -- loss_weight: {cfg.gram.loss_weight}")
             logger.info(f"OPTIONS -- GRAM -- ema teacher: {cfg.gram.ema_teacher}")
             logger.info(f"OPTIONS -- GRAM -- ckpt: {cfg.gram.ckpt}")
+            logger.info(
+                "OPTIONS -- GRAM -- loss weight schedule relative to first update: "
+                f"{self.gram_loss_schedule_relative_to_first_update}"
+            )
             if self.cfg.gram.rep_update:
                 logger.info(f"OPTIONS -- GRAM -- repeated update: {cfg.gram.rep_update}")
                 logger.info(f"OPTIONS -- GRAM -- update freq: {cfg.gram.update_frequency}")
@@ -306,10 +319,22 @@ class SSLMetaArch(nn.Module):
         self.ibot_patch_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
-            if resume_ckpt_dir is not None:
-                logger.info(f"Skipping gram.ckpt load; gram teacher will be restored from resume checkpoint {resume_ckpt_dir}")
+            resume_has_gram_teacher = (
+                resume_ckpt_dir is not None
+                and checkpoint_contains_state_key_prefix(resume_ckpt_dir, "model.gram_teacher.")
+            )
+            if resume_has_gram_teacher:
+                logger.info(
+                    f"Skipping gram.ckpt load; gram teacher will be restored from resume checkpoint {resume_ckpt_dir}"
+                )
                 self.gram_teacher_initialized = True
-            elif self.gram_ckpt is not None:
+            elif resume_ckpt_dir is not None:
+                logger.info(
+                    f"Resume checkpoint {resume_ckpt_dir} has no gram teacher state; "
+                    "GRAM teacher will be initialized from gram.ckpt, EMA load, or first update."
+                )
+
+            if not self.gram_teacher_initialized and self.gram_has_ckpt:
                 logger.info(f"Loading pretrained weights from {self.gram_ckpt}")
                 init_fsdp_model_from_checkpoint(
                     self.gram_teacher,
@@ -324,7 +349,16 @@ class SSLMetaArch(nn.Module):
                     process_group=distributed.get_default_process_group(),
                 )
                 self.gram_teacher_initialized = True
-            else:
+            elif (
+                not self.gram_teacher_initialized
+                and not self.gram_has_ckpt
+                and self.gram_it_load_ema_teacher < 0
+                and not (
+                    self.gram_loss_schedule_relative_to_first_update
+                    and self.gram_rep_update
+                    and self.gram_it_first_update >= 0
+                )
+            ):
                 raise ValueError(f"Provide a correct path to {self.gram_ckpt}")
             self.gram_teacher.requires_grad_(False)
             self.gram_teacher.eval()
@@ -661,7 +695,12 @@ class SSLMetaArch(nn.Module):
             )
 
             if self.gram_loss_schedule is not None:
-                gram_loss_weight = self.gram_loss_schedule[iteration]
+                gram_schedule_iteration = get_gram_loss_schedule_iteration(
+                    iteration,
+                    it_first_update=self.gram_it_first_update,
+                    relative_to_first_update=self.gram_loss_schedule_relative_to_first_update,
+                )
+                gram_loss_weight = self.gram_loss_schedule[gram_schedule_iteration]
             else:
                 gram_loss_weight = self.gram_loss_weight
 
@@ -747,6 +786,7 @@ class SSLMetaArch(nn.Module):
         with torch.no_grad():
             torch._foreach_mul_(gramteacher_param_list, m)
             torch._foreach_add_(gramteacher_param_list, teacher_param_list, alpha=1 - m)
+        self.gram_teacher_initialized = True
 
     def build_data_augmentation_dino(self, cfg):
         return DataAugmentationDINO(

@@ -171,6 +171,13 @@ def load_checkpoint(
     return iteration
 
 
+def checkpoint_contains_state_key_prefix(ckpt_dir: str | Path, prefix: str) -> bool:
+    """Return whether a distributed checkpoint metadata entry starts with `prefix`."""
+    ckpt_dir = Path(ckpt_dir)
+    metadata = dcpfs.FileSystemReader(ckpt_dir).read_metadata()
+    return any(key.startswith(prefix) for key in metadata.state_dict_metadata)
+
+
 def register_dont_save_hooks(module: torch.nn.Module, dont_save: Sequence[str]):
     """
     Registers save/load state dict hooks such that the weights in `dont_save` are not persisted in the checkpoint.

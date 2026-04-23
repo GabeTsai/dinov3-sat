@@ -243,6 +243,46 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
             param_group["lr"] = lr * lr_multiplier
 
 
+def get_num_gram_updates_before_start(cfg, model, start_iter):
+    """
+    
+    """
+    if not (cfg.gram.use_loss and model.has_gram_teacher and cfg.gram.rep_update and start_iter > 0):
+        return 0
+    if cfg.gram.get("loss_weight_schedule_relative_to_first_update", False):
+        if start_iter <= cfg.gram.it_first_update or not model.gram_teacher_initialized:
+            return 0
+        return 1 + (start_iter - cfg.gram.it_first_update) // cfg.gram.update_frequency
+    if start_iter < cfg.gram.it_first_update: # current iter is before first gram update
+        return 0
+    # last completed step before resuming is at start_iter - 1, right after that is where first gram update happens
+    return math.ceil((start_iter + 1 - cfg.gram.it_first_update) / cfg.gram.update_frequency)
+
+
+def should_update_gram_before_forward(cfg, model, iteration, num_gram_updates):
+    return (
+        cfg.gram.use_loss
+        and model.has_gram_teacher
+        and model.gram_rep_update
+        and cfg.gram.get("loss_weight_schedule_relative_to_first_update", False)
+        and (iteration == model.gram_it_first_update or (iteration >= model.gram_it_first_update and not model.gram_teacher_initialized))
+        and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
+    )
+
+
+def should_update_gram_after_step(cfg, model, iteration, num_gram_updates):
+    if not (
+        cfg.gram.use_loss
+        and model.gram_rep_update
+        and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
+    ):
+        return False
+    if cfg.gram.get("loss_weight_schedule_relative_to_first_update", False):
+        steps_since_first_update = iteration + 1 - model.gram_it_first_update
+        return steps_since_first_update > 0 and steps_since_first_update % model.gram_update_frequency == 0
+    return (iteration + 1) >= model.gram_it_first_update and (iteration + 1) % model.gram_update_frequency == 0
+
+
 def do_test(cfg, model, iteration, process_group, do_low_freq=False):
     # dump a sharded checkpoint
     eval_dir = Path(cfg.train.output_dir) / "eval" / str(iteration)
@@ -447,17 +487,8 @@ def do_train(cfg, model, resume=False):
     # Training loop
     student = model.student
     iteration = start_iter
-    num_gram_updates = 0
-    if (
-        cfg.gram.use_loss
-        and model.has_gram_teacher
-        and cfg.gram.rep_update
-        and start_iter > 0
-        and start_iter >= cfg.gram.it_first_update
-    ):
-        # If `start_iter == it_first_update`, we have performed one gram teacher update after
-        # iteration `start_iter - 1`, except if we are starting training from scratch and `start_iter == 0`.
-        num_gram_updates = math.ceil((start_iter + 1 - cfg.gram.it_first_update) / cfg.gram.update_frequency)
+    num_gram_updates = get_num_gram_updates_before_start(cfg, model, start_iter)
+    if num_gram_updates > 0:
         logger.info(f"Gram was updated {num_gram_updates} times before iteration {start_iter}")
     consecutive_nan_count = 0
     for data in metric_logger.log_every(
@@ -480,6 +511,11 @@ def do_train(cfg, model, resume=False):
         if cfg.gram.use_loss and model.gram_it_load_ema_teacher == it:
             logger.info(f"Loading EMA teacher into Gram teacher before iteration {it}")
             model.gram_load_ema_teacher()
+
+        if should_update_gram_before_forward(cfg, model, it, num_gram_updates):
+            logger.info(f"Updating Gram teacher from EMA teacher before iteration {it}")
+            model.update_gram()
+            num_gram_updates += 1
 
         # Learning rates and other schedules
         lr = lr_schedule[it]
@@ -541,13 +577,7 @@ def do_train(cfg, model, resume=False):
         model.update_ema(mom)
 
         # [GRAM] Update gram teacher when using gram teacher and frequent updates
-        if (
-            cfg.gram.use_loss
-            and model.gram_rep_update
-            and (it + 1) >= model.gram_it_first_update
-            and (it + 1) % model.gram_update_frequency == 0
-            and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
-        ):
+        if should_update_gram_after_step(cfg, model, it, num_gram_updates):
             logger.info(f"Updating Gram teacher from EMA teacher after iteration {it}")
             model.update_gram()
             num_gram_updates += 1
