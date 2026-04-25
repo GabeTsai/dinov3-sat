@@ -25,6 +25,7 @@ Distributed checkpointer docs:
 """
 
 import logging
+import io
 import shutil
 import subprocess
 import tempfile
@@ -49,7 +50,9 @@ logger = logging.getLogger("dinov3")
 
 
 class TrustedLegacyLoadPlanner(dcp.default_planner.DefaultLoadPlanner):
-    """Load planner that opts into unsafe byte deserialization for trusted legacy DCP checkpoints."""
+    """
+    Load planner that opts into unsafe byte deserialization for trusted legacy DCP checkpoints.
+    """
 
     def load_bytes(self, read_item, value: BytesIO) -> None:
         loaded = torch.load(value, weights_only=False)
@@ -61,6 +64,47 @@ class TrustedLegacyLoadPlanner(dcp.default_planner.DefaultLoadPlanner):
             )
         else:
             self.state_dict[read_item.dest_index.fqn] = loaded
+
+
+class TrustedLegacyFileSystemReader(dcpfs.FileSystemReader):
+    """
+    FileSystemReader that opts into unsafe tensor deserialization for trusted legacy DCP checkpoints.
+    """
+
+    def read_data(self, plan, planner):
+        per_file = {}
+        for read_item in plan.items:
+            item_md = self.storage_data[read_item.storage_index]
+            path = item_md.relative_path
+            per_file.setdefault(path, []).append(read_item)
+
+        for relative_path, reqs in per_file.items():
+            new_path = self.fs.concat_path(self.path, relative_path)
+            with self.fs.create_stream(new_path, "rb") as stream:
+                for req in reqs:
+                    item_md = self.storage_data[req.storage_index]
+                    file_slice = self._slice_file(stream, item_md)
+                    if req.type == dcpfs.LoadItemType.BYTE_IO:
+                        read_bytes = io.BytesIO(file_slice.read(item_md.length))
+                        read_bytes.seek(0)
+                        planner.load_bytes(req, read_bytes)
+                    else:
+                        tensor = dcpfs.cast(
+                            dcpfs.Tensor,
+                            torch.load(dcpfs.cast(io.IOBase, file_slice), map_location="cpu", weights_only=False),
+                        )
+                        tensor = dcpfs.narrow_tensor_by_index(tensor, req.storage_offsets, req.lengths)
+                        target_tensor = planner.resolve_tensor(req).detach()
+
+                        assert (
+                            target_tensor.size() == tensor.size()
+                        ), f"req {req.storage_index} mismatch sizes {target_tensor.size()} vs {tensor.size()}"
+                        target_tensor.copy_(tensor)
+                        planner.commit_tensor(req, target_tensor)
+
+        fut = dcpfs.Future()
+        fut.set_result(None)
+        return fut
 
 
 class CheckpointRetentionPolicy(Enum):
@@ -175,14 +219,15 @@ def load_checkpoint(
         to_load["optimizer"] = dcpsd.get_optimizer_state_dict(model, optimizer)
     to_load.update(others)
     planner_cls = TrustedLegacyLoadPlanner if trusted_legacy_bytes else dcp.default_planner.DefaultLoadPlanner
+    reader_cls = TrustedLegacyFileSystemReader if trusted_legacy_bytes else dcpfs.FileSystemReader
     if trusted_legacy_bytes and (not dist.is_initialized() or dist.get_rank() == 0):
         logger.warning(
-            "Trusted legacy DCP resume enabled for %s; loading non-tensor checkpoint bytes with weights_only=False",
+            "Trusted legacy DCP resume enabled for %s; loading checkpoint entries with weights_only=False",
             ckpt_dir,
         )
     dcp.load(
         to_load,
-        storage_reader=dcpfs.FileSystemReader(ckpt_dir),
+        storage_reader=reader_cls(ckpt_dir),
         planner=planner_cls(allow_partial_load=not strict_loading),
         process_group=process_group,
     )

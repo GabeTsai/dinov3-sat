@@ -28,22 +28,32 @@ def test_trusted_legacy_load_planner_uses_weights_only_false(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("trusted_legacy_bytes", "expected_planner_type"),
+    ("trusted_legacy_bytes", "expected_planner_type", "expected_reader_tag"),
     [
-        (False, checkpointer.dcp.default_planner.DefaultLoadPlanner),
-        (True, checkpointer.TrustedLegacyLoadPlanner),
+        (False, checkpointer.dcp.default_planner.DefaultLoadPlanner, "default-reader"),
+        (True, checkpointer.TrustedLegacyLoadPlanner, "trusted-reader"),
     ],
 )
-def test_load_checkpoint_selects_expected_planner(monkeypatch, trusted_legacy_bytes, expected_planner_type):
+def test_load_checkpoint_selects_expected_planner(monkeypatch, trusted_legacy_bytes, expected_planner_type, expected_reader_tag):
     captured = {}
 
     monkeypatch.setattr(checkpointer.dcpsd, "get_model_state_dict", lambda model: {})
     monkeypatch.setattr(checkpointer.dcpsd, "set_model_state_dict", lambda model, state_dict: None)
-    monkeypatch.setattr(checkpointer.dcpfs, "FileSystemReader", lambda ckpt_dir: ("reader", ckpt_dir))
     monkeypatch.setattr(checkpointer.dist, "is_initialized", lambda: False)
 
+    class DefaultReader:
+        def __init__(self, ckpt_dir):
+            self.payload = ("default-reader", ckpt_dir)
+
+    class TrustedReader:
+        def __init__(self, ckpt_dir):
+            self.payload = ("trusted-reader", ckpt_dir)
+
+    monkeypatch.setattr(checkpointer.dcpfs, "FileSystemReader", DefaultReader)
+    monkeypatch.setattr(checkpointer, "TrustedLegacyFileSystemReader", TrustedReader)
+
     def fake_dcp_load(state_dict, *, storage_reader, planner, process_group):
-        captured["storage_reader"] = storage_reader
+        captured["storage_reader"] = storage_reader.payload
         captured["planner"] = planner
         state_dict["iteration"] = 7
 
@@ -56,7 +66,7 @@ def test_load_checkpoint_selects_expected_planner(monkeypatch, trusted_legacy_by
     )
 
     assert iteration == 7
-    assert captured["storage_reader"] == ("reader", Path("trusted/legacy/ckpt"))
+    assert captured["storage_reader"] == (expected_reader_tag, Path("trusted/legacy/ckpt"))
     assert isinstance(captured["planner"], expected_planner_type)
 
 
