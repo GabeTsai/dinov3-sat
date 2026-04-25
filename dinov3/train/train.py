@@ -129,6 +129,11 @@ def get_args_parser(add_help: bool = True):
         action="store_true",
         help="Whether to not attempt to resume from the checkpoint directory. ",
     )
+    parser.add_argument(
+        "--trusted-legacy-resume",
+        action="store_true",
+        help="Allow trusted legacy distributed checkpoints to load non-tensor metadata with weights_only=False.",
+    )
     parser.add_argument("--eval-only", action="store_true", help="perform evaluation only")
     parser.add_argument("--eval", type=str, default="", help="Eval type to perform")
     parser.add_argument(
@@ -317,11 +322,11 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
         is_last_layer = param_group["is_last_layer"]
         lr_multiplier = param_group["lr_multiplier"]
         wd_multiplier = param_group["wd_multiplier"]
-        param_group["weight_decay"] = wd * wd_multiplier
+        param_group["weight_decay"] = float(wd * wd_multiplier)
         if is_last_layer:
-            param_group["lr"] = last_layer_lr * lr_multiplier
+            param_group["lr"] = float(last_layer_lr * lr_multiplier)
         else:
-            param_group["lr"] = lr * lr_multiplier
+            param_group["lr"] = float(lr * lr_multiplier)
 
 
 def get_num_gram_updates_before_start(cfg, model, start_iter):
@@ -508,7 +513,7 @@ def build_multi_resolution_data_loader_from_cfg(
     return data_loader
 
 
-def do_train(cfg, model, resume=False):
+def do_train(cfg, model, resume=False, trusted_legacy_resume=False):
     process_subgroup = distributed.get_process_subgroup()
     ckpt_dir = Path(cfg.train.output_dir, "ckpt").expanduser()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -539,6 +544,7 @@ def do_train(cfg, model, resume=False):
                 model=model,
                 optimizer=optimizer,
                 strict_loading=False,
+                trusted_legacy_bytes=trusted_legacy_resume,
                 process_group=process_subgroup,
             )
             + 1
@@ -815,7 +821,7 @@ def main(argv=None):
             + 1
         )
         return do_test(cfg, model, f"manual_{iteration}")
-    do_train(cfg, model, resume=not args.no_resume)
+    do_train(cfg, model, resume=not args.no_resume, trusted_legacy_resume=args.trusted_legacy_resume)
 
 
 if __name__ == "__main__":

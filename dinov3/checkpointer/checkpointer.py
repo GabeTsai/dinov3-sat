@@ -28,6 +28,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+from io import BytesIO
 from enum import Enum
 from pathlib import Path
 from typing import List, Sequence, Set
@@ -45,6 +46,21 @@ from dinov3.models import build_model_from_cfg
 from omegaconf import OmegaConf
 
 logger = logging.getLogger("dinov3")
+
+
+class TrustedLegacyLoadPlanner(dcp.default_planner.DefaultLoadPlanner):
+    """Load planner that opts into unsafe byte deserialization for trusted legacy DCP checkpoints."""
+
+    def load_bytes(self, read_item, value: BytesIO) -> None:
+        loaded = torch.load(value, weights_only=False)
+        if self.flatten_state_dict:
+            dcp.default_planner.set_element(
+                self.original_state_dict,
+                self.mappings[read_item.dest_index.fqn],
+                loaded,
+            )
+        else:
+            self.state_dict[read_item.dest_index.fqn] = loaded
 
 
 class CheckpointRetentionPolicy(Enum):
@@ -143,6 +159,7 @@ def load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
     strict_loading: bool = True,
+    trusted_legacy_bytes: bool = False,
     process_group: dist.ProcessGroup = None,
     **others: Stateful,
 ) -> int | None:
@@ -157,10 +174,16 @@ def load_checkpoint(
     if optimizer is not None:
         to_load["optimizer"] = dcpsd.get_optimizer_state_dict(model, optimizer)
     to_load.update(others)
+    planner_cls = TrustedLegacyLoadPlanner if trusted_legacy_bytes else dcp.default_planner.DefaultLoadPlanner
+    if trusted_legacy_bytes and (not dist.is_initialized() or dist.get_rank() == 0):
+        logger.warning(
+            "Trusted legacy DCP resume enabled for %s; loading non-tensor checkpoint bytes with weights_only=False",
+            ckpt_dir,
+        )
     dcp.load(
         to_load,
         storage_reader=dcpfs.FileSystemReader(ckpt_dir),
-        planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=not strict_loading),
+        planner=planner_cls(allow_partial_load=not strict_loading),
         process_group=process_group,
     )
     iteration = to_load["iteration"]
