@@ -534,7 +534,11 @@ def do_train(cfg, model, resume=False, trusted_legacy_resume=False):
             dont_save=[k for k, _ in model.state_dict().items() if k.startswith("teacher")],
         )
     last_checkpoint_dir = find_latest_checkpoint(ckpt_dir) if resume else None
-    model.init_weights(resume_ckpt_dir=last_checkpoint_dir)
+    skip_resume_gram_teacher = trusted_legacy_resume and getattr(model, "has_gram_teacher", False)
+    model.init_weights(
+        resume_ckpt_dir=last_checkpoint_dir,
+        skip_resume_gram_teacher=skip_resume_gram_teacher,
+    )
     start_iter = 0
     if last_checkpoint_dir is not None:
         logger.info(f"Checkpoint found {last_checkpoint_dir}")
@@ -545,6 +549,7 @@ def do_train(cfg, model, resume=False, trusted_legacy_resume=False):
                 optimizer=optimizer,
                 strict_loading=False,
                 trusted_legacy_bytes=trusted_legacy_resume,
+                skip_model_prefixes=("gram_teacher.",) if skip_resume_gram_teacher else (),
                 process_group=process_subgroup,
             )
             + 1

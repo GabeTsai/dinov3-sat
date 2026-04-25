@@ -317,7 +317,7 @@ class SSLMetaArch(nn.Module):
         )
         self.teacher = nn.ModuleDict(teacher_model_dict)
 
-    def init_weights(self, resume_ckpt_dir=None) -> None:
+    def init_weights(self, resume_ckpt_dir=None, skip_resume_gram_teacher: bool = False) -> None:
         # All weights are set to `nan` to ensure we initialize everything explicitly
         self.student.backbone.init_weights()
         self.student.dino_head.init_weights()
@@ -327,7 +327,8 @@ class SSLMetaArch(nn.Module):
         self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
             resume_has_gram_teacher = (
-                resume_ckpt_dir is not None
+                not skip_resume_gram_teacher
+                and resume_ckpt_dir is not None
                 and checkpoint_contains_state_key_prefix(resume_ckpt_dir, "model.gram_teacher.")
             )
             if resume_has_gram_teacher:
@@ -335,6 +336,11 @@ class SSLMetaArch(nn.Module):
                     f"Skipping gram.ckpt load; gram teacher will be restored from resume checkpoint {resume_ckpt_dir}"
                 )
                 self.gram_teacher_initialized = True
+            elif skip_resume_gram_teacher and resume_ckpt_dir is not None:
+                logger.info(
+                    f"Ignoring gram teacher state in resume checkpoint {resume_ckpt_dir}; "
+                    "GRAM teacher will be initialized from gram.ckpt, EMA load, or first update."
+                )
             elif resume_ckpt_dir is not None:
                 logger.info(
                     f"Resume checkpoint {resume_ckpt_dir} has no gram teacher state; "

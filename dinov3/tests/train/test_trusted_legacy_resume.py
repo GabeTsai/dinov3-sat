@@ -70,6 +70,36 @@ def test_load_checkpoint_selects_expected_planner(monkeypatch, trusted_legacy_by
     assert isinstance(captured["planner"], expected_planner_type)
 
 
+def test_load_checkpoint_filters_skipped_model_prefixes(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        checkpointer.dcpsd,
+        "get_model_state_dict",
+        lambda model: {
+            "student.backbone.weight": "student",
+            "gram_teacher.backbone.weight": "gram",
+        },
+    )
+    monkeypatch.setattr(checkpointer.dcpsd, "set_model_state_dict", lambda model, state_dict: None)
+    monkeypatch.setattr(checkpointer.dcpfs, "FileSystemReader", lambda ckpt_dir: ("reader", ckpt_dir))
+
+    def fake_dcp_load(state_dict, *, storage_reader, planner, process_group):
+        captured["model_keys"] = tuple(sorted(state_dict["model"].keys()))
+        state_dict["iteration"] = 3
+
+    monkeypatch.setattr(checkpointer.dcp, "load", fake_dcp_load)
+
+    iteration = checkpointer.load_checkpoint(
+        "trusted/legacy/ckpt",
+        model=object(),
+        skip_model_prefixes=("gram_teacher.",),
+    )
+
+    assert iteration == 3
+    assert captured["model_keys"] == ("student.backbone.weight",)
+
+
 def test_get_args_parser_parses_trusted_legacy_resume_flag():
     args = train.get_args_parser().parse_args(["--trusted-legacy-resume"])
 
@@ -88,7 +118,7 @@ def test_do_train_passes_trusted_legacy_resume_to_load_checkpoint(monkeypatch, t
     model = SimpleNamespace(
         train=lambda: None,
         get_params_groups=lambda: [],
-        init_weights=lambda resume_ckpt_dir=None: None,
+        init_weights=lambda resume_ckpt_dir=None, skip_resume_gram_teacher=False: None,
         student=object(),
     )
     load_kwargs = {}
@@ -103,6 +133,7 @@ def test_do_train_passes_trusted_legacy_resume_to_load_checkpoint(monkeypatch, t
     monkeypatch.setattr(train, "build_multi_resolution_data_loader_from_cfg", lambda cfg, model, start_iter: [])
     monkeypatch.setattr(train, "get_schedule_state", lambda cfg: {"schedule_total_iterations": 0})
     monkeypatch.setattr(train, "get_num_gram_updates_before_start", lambda cfg, model, start_iter: 0)
+    model.has_gram_teacher = True
 
     def fake_load_checkpoint(*args, **kwargs):
         load_kwargs.update(kwargs)
@@ -113,6 +144,7 @@ def test_do_train_passes_trusted_legacy_resume_to_load_checkpoint(monkeypatch, t
     train.do_train(cfg, model, resume=True, trusted_legacy_resume=True)
 
     assert load_kwargs["trusted_legacy_bytes"] is True
+    assert load_kwargs["skip_model_prefixes"] == ("gram_teacher.",)
 
 
 def test_apply_optim_scheduler_casts_numpy_scalars_to_python_floats():

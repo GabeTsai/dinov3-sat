@@ -139,7 +139,6 @@ class CheckpointRetentionPolicy(Enum):
 
 def save_checkpoint(
     ckpt_dir: str | Path,  # output_dir/ckpt/199
-    *,
     iteration: int | str,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
@@ -199,11 +198,11 @@ def save_checkpoint(
 
 def load_checkpoint(
     ckpt_dir: str | Path,  # output_dir/ckpt/199
-    *,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
     strict_loading: bool = True,
     trusted_legacy_bytes: bool = False,
+    skip_model_prefixes: Sequence[str] = (),
     process_group: dist.ProcessGroup = None,
     **others: Stateful,
 ) -> int | None:
@@ -214,7 +213,14 @@ def load_checkpoint(
     """
     ckpt_dir = Path(ckpt_dir)
     to_load = {"iteration": None}
-    to_load["model"] = dcpsd.get_model_state_dict(model)
+    model_state = dcpsd.get_model_state_dict(model)
+    if skip_model_prefixes:
+        model_state = {
+            key: value
+            for key, value in model_state.items()
+            if not any(key.startswith(prefix) for prefix in skip_model_prefixes)
+        }
+    to_load["model"] = model_state
     if optimizer is not None:
         to_load["optimizer"] = dcpsd.get_optimizer_state_dict(model, optimizer)
     to_load.update(others)
