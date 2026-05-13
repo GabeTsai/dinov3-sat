@@ -17,7 +17,7 @@ from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
-from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
+from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, SIGReg, iBOTPatchLoss
 from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import (
     build_gram_loss_weight_schedule,
@@ -150,6 +150,23 @@ class SSLMetaArch(nn.Module):
         self.dino_loss_weight = self.cfg.dino.loss_weight
         self.dino_koleo_loss_weight = self.cfg.dino.koleo_loss_weight
         self.ibot_loss_weight = self.cfg.ibot.loss_weight
+        self.koleo_enabled = self.dino_koleo_loss_weight > 0
+        self.ibot_enabled = self.ibot_loss_weight > 0
+        self.sigreg_use_loss = self.cfg.sigreg.use_loss and self.cfg.sigreg.loss_weight > 0
+        self.sigreg_loss_weight = self.cfg.sigreg.loss_weight
+
+        logger.info("OPTIONS -- SIGREG")
+        logger.info(f"OPTIONS -- SIGREG -- use_loss: {self.cfg.sigreg.use_loss}")
+        logger.info(f"OPTIONS -- SIGREG -- loss_weight: {self.cfg.sigreg.loss_weight}")
+        logger.info(f"OPTIONS -- SIGREG -- n_knots: {self.cfg.sigreg.n_knots}")
+        logger.info(f"OPTIONS -- SIGREG -- t_max: {self.cfg.sigreg.t_max}")
+        logger.info(f"OPTIONS -- SIGREG -- n_slices: {self.cfg.sigreg.n_slices}")
+        if self.sigreg_use_loss:
+            self.sigreg_loss = SIGReg(
+                n_knots=self.cfg.sigreg.n_knots,
+                t_max=self.cfg.sigreg.t_max,
+                n_slices=self.cfg.sigreg.n_slices,
+            )
 
         # Local loss reweighting
         if self.cfg.dino.reweight_dino_local_loss:
@@ -497,9 +514,10 @@ class SSLMetaArch(nn.Module):
         reg = backbone_out["x_storage_tokens"]  # [n_crops * B, R, D]
         ibot_patch = backbone_out["x_norm_patchtokens"]  # [n_crops * B, P, D]
 
-        # IBOT head only on patches that are masked for the student
-        buffer = torch.index_select(ibot_patch.flatten(0, 1), dim=0, index=mask_indices_list)
-        masked_patch_after_head = self.teacher.ibot_head(buffer)
+        if self.ibot_enabled:
+            # IBOT head only on patches that are masked for the student
+            buffer = torch.index_select(ibot_patch.flatten(0, 1), dim=0, index=mask_indices_list)
+            masked_patch_after_head = self.teacher.ibot_head(buffer)
 
         # DINO head on CLS tokens
         cls_after_head = self.teacher.dino_head(cls)  # [n_crops * B, K]
@@ -509,20 +527,21 @@ class SSLMetaArch(nn.Module):
             cls_after_head, teacher_temp=teacher_temp
         )  # [n_crops * B, K]
         cls_centered = cls_centered.unflatten(0, (n_crops, B))  # [n_crops, B, K]
-        masked_patch_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
-            masked_patch_after_head,
-            teacher_temp=teacher_temp,
-            n_masked_patches_tensor=n_masked_patches_tensor,
-        )  # [n_masked_patches, K]
 
-        return {
+        teacher_output = {
             "cls_pre_head": cls.unflatten(0, [n_crops, B]),  # [n_crops, B, D]
             "reg_pre_head": reg.unflatten(0, [n_crops, B]),  # [n_crops, B, R, D]
             "patch_pre_head": ibot_patch.unflatten(0, [n_crops, B]),  # [n_crops, B, P, D]
             "cls_after_head": cls_after_head.unflatten(0, [n_crops, B]),  # [n_crops, B, K]
             "cls_centered": cls_centered,  # [n_crops, B, K]
-            "masked_patch_centered": masked_patch_centered,  # [n_masked_patches, K]
         }
+        if self.ibot_enabled:
+            teacher_output["masked_patch_centered"] = self.ibot_patch_loss.sinkhorn_knopp_teacher(
+                masked_patch_after_head,
+                teacher_temp=teacher_temp,
+                n_masked_patches_tensor=n_masked_patches_tensor,
+            )  # [n_masked_patches, K]
+        return teacher_output
 
     def get_gram_teacher_output(self, images, *, masks, teacher_global, student_global, student_global_crops_size):
         # Get student patch features
@@ -601,9 +620,10 @@ class SSLMetaArch(nn.Module):
             local_out["x_norm_patchtokens"],
         )
 
-        # IBOT head only on masked patches
-        masked_patches_pre_head = torch.index_select(g_patch.flatten(0, 1), dim=0, index=mask_indices_list)
-        global_masked_patch_after_head = self.student.ibot_head(masked_patches_pre_head)
+        if self.ibot_enabled:
+            # IBOT head only on masked patches
+            masked_patches_pre_head = torch.index_select(g_patch.flatten(0, 1), dim=0, index=mask_indices_list)
+            global_masked_patch_after_head = self.student.ibot_head(masked_patches_pre_head)
 
         # DINO head on CLS tokens (all in one pass)
         buffer = [
@@ -620,9 +640,10 @@ class SSLMetaArch(nn.Module):
             "reg_pre_head": g_reg.unflatten(0, [n_global_crops, B]),  # [n_global_crops, B, R, D]
             "patch_pre_head": g_patch.unflatten(0, [n_global_crops, B]),  # [n_global_crops, B, P, D]
             "cls_after_head": buffer[0].unflatten(0, [n_global_crops, B]),  # [n_global_crops, B, K],
-            "masked_patch_after_head": global_masked_patch_after_head,  # [n_masked_patches, K]
-            "masked_patch_pre_head": masked_patches_pre_head,  # [n_masked_patches, D]
         }
+        if self.ibot_enabled:
+            global_out["masked_patch_after_head"] = global_masked_patch_after_head  # [n_masked_patches, K]
+            global_out["masked_patch_pre_head"] = masked_patches_pre_head  # [n_masked_patches, D]
         local_out = {
             "cls_pre_head": l_cls.unflatten(0, [n_local_crops, B]),  # [n_local_crops, B, D]
             "reg_pre_head": l_reg.unflatten(0, [n_local_crops, B]),  # [n_local_crops, B, R, D]
@@ -683,21 +704,32 @@ class SSLMetaArch(nn.Module):
         loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
 
-        # Koleo: regularize pre-head CLS tokens of student(global crops)
-        koleo_loss = sum(self.koleo_loss(x) for x in student_global["cls_pre_head"]) / n_global_crops
-        loss_dict["koleo_loss"] = koleo_loss
-        loss_accumulator += self.dino_koleo_loss_weight * koleo_scale * koleo_loss
+        if self.sigreg_use_loss:
+            sigreg_views = torch.cat(
+                [student_global["cls_pre_head"], student_local["cls_pre_head"]],
+                dim=0,
+            )
+            sigreg_loss = self.sigreg_loss(sigreg_views)
+            loss_dict["sigreg_loss"] = sigreg_loss
+            loss_dict["sigreg_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_loss_weight)
+            loss_accumulator += self.sigreg_loss_weight * sigreg_loss
 
-        # IBOT loss
-        ibot_patch_loss = self.ibot_patch_loss.forward_masked(
-            student_global["masked_patch_after_head"],
-            teacher_global["masked_patch_centered"],
-            student_masks_flat=masks,
-            n_masked_patches=mask_indices_list.shape[0],
-            masks_weight=masks_weight,
-        )
-        loss_dict["ibot_loss"] = ibot_patch_loss
-        loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
+        if self.koleo_enabled:
+            # Koleo: regularize pre-head CLS tokens of student(global crops)
+            koleo_loss = sum(self.koleo_loss(x) for x in student_global["cls_pre_head"]) / n_global_crops
+            loss_dict["koleo_loss"] = koleo_loss
+            loss_accumulator += self.dino_koleo_loss_weight * koleo_scale * koleo_loss
+
+        if self.ibot_enabled:
+            ibot_patch_loss = self.ibot_patch_loss.forward_masked(
+                student_global["masked_patch_after_head"],
+                teacher_global["masked_patch_centered"],
+                student_masks_flat=masks,
+                n_masked_patches=mask_indices_list.shape[0],
+                masks_weight=masks_weight,
+            )
+            loss_dict["ibot_loss"] = ibot_patch_loss
+            loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
 
         # Gram loss
         if self.gram_use_loss:

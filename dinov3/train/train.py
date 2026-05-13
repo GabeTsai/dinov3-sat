@@ -57,6 +57,12 @@ logger = logging.getLogger("dinov3")
 SCHEDULE_STATE_FILENAME = "schedule_state.json"
 
 
+def get_effective_ibot_mask_probability(cfg):
+    if cfg.ibot.loss_weight == 0 and not cfg.ibot.force_masking:
+        return 0.0
+    return cfg.ibot.mask_sample_probability
+
+
 def get_schedule_state(cfg) -> dict[str, int]:
     total_iterations = resolve_schedule_total_iterations(
         iter_per_epoch=cfg.train.OFFICIAL_EPOCH_LENGTH,
@@ -425,7 +431,7 @@ def build_data_loader_from_cfg(
     collate_fn = partial(
         collate_data_and_cast,
         mask_ratio_tuple=cfg.ibot.mask_ratio_min_max,
-        mask_probability=cfg.ibot.mask_sample_probability,
+        mask_probability=get_effective_ibot_mask_probability(cfg),
         dtype={
             "fp32": torch.float32,
             "fp16": torch.float16,

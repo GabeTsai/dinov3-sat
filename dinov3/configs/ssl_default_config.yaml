@@ -35,13 +35,19 @@ ibot:
   - 0.1
   - 0.5
   mask_random_circular_shift: false
-  force_masking_even_with_zero_weight: False
+  force_masking: False
   separate_head: true
   head_n_prototypes: 65536
   head_bottleneck_dim: 256
   head_norm_last_layer: false
   head_nlayers: 3
   head_hidden_dim: 2048
+sigreg:
+  use_loss: false
+  loss_weight: 0.0
+  n_knots: 17
+  t_max: 3.0
+  n_slices: 1024
 gram:
   use_loss: false # (bool) if true gram is used, else not
   compute_stats: false # (bool): if true compute auxilliary stats
@@ -61,6 +67,7 @@ gram:
   global_teacher_resize_method: bicubic  # Method for resizing the outputs of the gram teacher
   global_teacher_resize_antialias: false  # Whether to use antialiasing when resizing the outputs of the gram teacher
   loss_weight_schedule: null  # (dict): If not None, use a schedule for the loss weight instead of `loss_weight`
+  loss_weight_schedule_relative_to_first_update: false  # (bool): if true, index loss_weight_schedule from gram.it_first_update
 train:
   batch_size_per_gpu: 64
   dataset_path: ImageNet:split=TRAIN
@@ -131,6 +138,8 @@ hrft:  # non-hrft'd student
   checkpoint_path: ""  # teacher_checkpoint path
 optim:
   epochs: 100
+  schedule_epochs: null  # Optional schedule horizon in epochs; when null, follows optim.epochs
+  schedule_total_iterations: null  # Optional absolute schedule horizon in iterations; overrides schedule_epochs
   optimizer: adamw
   weight_decay: 0.04
   weight_decay_end: 0.4
