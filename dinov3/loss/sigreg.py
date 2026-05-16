@@ -30,17 +30,28 @@ class SIGReg(nn.Module):
         self.t_max = t_max
         self.n_slices = n_slices
 
+        if n_knots < 2:
+            raise ValueError("SIGReg requires n_knots >= 2")
+        if n_slices < 1:
+            raise ValueError("SIGReg requires n_slices >= 1")
+
+        self.register_buffer("t", torch.empty(n_knots, dtype=torch.float32))
+        self.register_buffer("phi", torch.empty(n_knots, dtype=torch.float32))
+        self.register_buffer("weights", torch.empty(n_knots, dtype=torch.float32))
+        self.init_weights()
+
+    def init_weights(self) -> None:
         # LeJEPA paper approximates integral using trapezoid method
-        t = torch.linspace(0, t_max, n_knots, dtype=torch.float32)
-        dt = t_max / (n_knots - 1)
-        weights = torch.full((n_knots,), 2 * dt)
+        t = torch.linspace(0, self.t_max, self.n_knots, dtype=torch.float32, device=self.t.device)
+        dt = self.t_max / (self.n_knots - 1)
+        weights = torch.full((self.n_knots,), 2 * dt, dtype=torch.float32, device=self.weights.device)
         weights[[0, -1]] = dt
 
         # Epps-Pulley downweighting term - CF of N(0, 1)
         w_t = torch.exp(-t.square() / 2.0)
-        self.register_buffer("t", t)
-        self.register_buffer("phi", w_t)  # set target CF to also be w_t
-        self.register_buffer("weights", weights * w_t)
+        self.t.copy_(t)
+        self.phi.copy_(w_t)  # set target CF to also be w_t
+        self.weights.copy_(weights * w_t)
 
     def forward(self, proj: Float[Tensor, "V B D"]) -> Float[Tensor, ""]:  # noqa: F722
         samples = proj.flatten(0, 1).float()

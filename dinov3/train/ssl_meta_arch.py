@@ -341,6 +341,8 @@ class SSLMetaArch(nn.Module):
         self.student.ibot_head.init_weights()
         self.dino_loss.init_weights()
         self.ibot_patch_loss.init_weights()
+        if self.sigreg_use_loss:
+            self.sigreg_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
             resume_has_gram_teacher = (
