@@ -82,6 +82,7 @@ def effective_rank(
         scalar tensor in roughly [1, min(B - 1, D)]
     """
 
+    x = x.float()
     B = x.shape[0]
     if B <= 1:
         return torch.tensor(1.0, device=x.device)
