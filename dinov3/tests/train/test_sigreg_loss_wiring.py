@@ -79,6 +79,26 @@ def test_sigreg_uses_student_global_local_cls_pre_head_views():
     assert loss_dict["sigreg_loss"].item() == 2.0
     assert loss_dict["sigreg_loss_weight"].item() == 0.25
     assert loss.item() == 0.5
+    assert "sigreg_cls_std_mean" in loss_dict
+    assert "sigreg_cls_std_min" in loss_dict
+    assert "sigreg_cls_pairwise_cos_mean" in loss_dict
+    assert "sigreg_cls_effective_rank" in loss_dict
+
+
+def test_sigreg_expensive_metrics_are_rate_limited():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_use_loss = True
+    arch.sigreg_loss_weight = 0.25
+    arch.sigreg_loss = _SIGRegStub()
+    inputs = _loss_inputs()
+    inputs["iteration"] = 1
+
+    _, loss_dict = arch.compute_losses(**inputs)
+
+    assert "sigreg_cls_std_mean" in loss_dict
+    assert "sigreg_cls_std_min" in loss_dict
+    assert "sigreg_cls_pairwise_cos_mean" not in loss_dict
+    assert "sigreg_cls_effective_rank" not in loss_dict
 
 
 def test_zero_ibot_weight_disables_masking_unless_forced():

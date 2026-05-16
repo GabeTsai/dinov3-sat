@@ -27,6 +27,7 @@ from dinov3.train.cosine_lr_scheduler import (
 )
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
+from dinov3.utils.metrics import effective_rank, pairwise_cos_mean, std_mean, std_min
 
 logger = logging.getLogger("dinov3")
 
@@ -714,6 +715,12 @@ class SSLMetaArch(nn.Module):
             sigreg_loss = self.sigreg_loss(sigreg_views)
             loss_dict["sigreg_loss"] = sigreg_loss
             loss_dict["sigreg_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_loss_weight)
+            sigreg_samples = sigreg_views.flatten(0, 1)
+            loss_dict["sigreg_cls_std_mean"] = std_mean(sigreg_samples)
+            loss_dict["sigreg_cls_std_min"] = std_min(sigreg_samples)
+            if iteration % 100 == 0:
+                loss_dict["sigreg_cls_pairwise_cos_mean"] = pairwise_cos_mean(sigreg_samples)
+                loss_dict["sigreg_cls_effective_rank"] = effective_rank(sigreg_samples)
             loss_accumulator += self.sigreg_loss_weight * sigreg_loss
 
         if self.koleo_enabled:
