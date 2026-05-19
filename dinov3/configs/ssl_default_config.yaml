@@ -43,11 +43,12 @@ ibot:
   head_nlayers: 3
   head_hidden_dim: 2048
 sigreg:
-  use_loss: false
-  loss_weight: 0.0
+  cls_loss_weight: 0.0
+  patch_loss_weight: 0.0
   n_knots: 17
   t_max: 3.0
   n_slices: 1024
+  n_patches: null
 gram:
   use_loss: false # (bool) if true gram is used, else not
   compute_stats: false # (bool): if true compute auxilliary stats

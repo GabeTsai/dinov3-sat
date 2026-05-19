@@ -153,20 +153,36 @@ class SSLMetaArch(nn.Module):
         self.ibot_loss_weight = self.cfg.ibot.loss_weight
         self.koleo_enabled = self.dino_koleo_loss_weight > 0
         self.ibot_enabled = self.ibot_loss_weight > 0
-        self.sigreg_use_loss = self.cfg.sigreg.use_loss and self.cfg.sigreg.loss_weight > 0
-        self.sigreg_loss_weight = self.cfg.sigreg.loss_weight
+        self.sigreg_on_cls = self.cfg.sigreg.cls_loss_weight > 0
+        self.sigreg_on_patch = self.cfg.sigreg.patch_loss_weight > 0
+        self.sigreg_cls_loss_weight = self.cfg.sigreg.cls_loss_weight
+        self.sigreg_patch_loss_weight = self.cfg.sigreg.patch_loss_weight
 
         logger.info("OPTIONS -- SIGREG")
-        logger.info(f"OPTIONS -- SIGREG -- use_loss: {self.cfg.sigreg.use_loss}")
-        logger.info(f"OPTIONS -- SIGREG -- loss_weight: {self.cfg.sigreg.loss_weight}")
+        logger.info(f"OPTIONS -- SIGREG -- on_cls: {self.sigreg_on_cls}")
+        logger.info(f"OPTIONS -- SIGREG -- on_patch: {self.sigreg_on_patch}")
+        if self.sigreg_on_cls:
+            logger.info(f"OPTIONS -- SIGREG -- cls_loss_weight: {self.cfg.sigreg.cls_loss_weight}")
+        if self.sigreg_on_patch:
+            logger.info(f"OPTIONS -- SIGREG -- patch_loss_weight: {self.cfg.sigreg.patch_loss_weight}")
+            logger.info(f"OPTIONS -- SIGREG -- n_patches: {self.cfg.sigreg.n_patches}")
         logger.info(f"OPTIONS -- SIGREG -- n_knots: {self.cfg.sigreg.n_knots}")
         logger.info(f"OPTIONS -- SIGREG -- t_max: {self.cfg.sigreg.t_max}")
         logger.info(f"OPTIONS -- SIGREG -- n_slices: {self.cfg.sigreg.n_slices}")
-        if self.sigreg_use_loss:
-            self.sigreg_loss = SIGReg(
+
+        if self.sigreg_on_cls:
+            self.sigreg_cls_loss = SIGReg(
                 n_knots=self.cfg.sigreg.n_knots,
                 t_max=self.cfg.sigreg.t_max,
                 n_slices=self.cfg.sigreg.n_slices,
+                n_patches=None,
+            )
+        if self.sigreg_on_patch:
+            self.sigreg_patch_loss = SIGReg(
+                n_knots=self.cfg.sigreg.n_knots,
+                t_max=self.cfg.sigreg.t_max,
+                n_slices=self.cfg.sigreg.n_slices,
+                n_patches=self.cfg.sigreg.n_patches,
             )
 
         # Local loss reweighting
@@ -342,8 +358,10 @@ class SSLMetaArch(nn.Module):
         self.student.ibot_head.init_weights()
         self.dino_loss.init_weights()
         self.ibot_patch_loss.init_weights()
-        if self.sigreg_use_loss:
-            self.sigreg_loss.init_weights()
+        if self.sigreg_on_cls:
+            self.sigreg_cls_loss.init_weights()
+        if self.sigreg_on_patch:
+            self.sigreg_patch_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
             resume_has_gram_teacher = (
@@ -395,6 +413,7 @@ class SSLMetaArch(nn.Module):
                 raise ValueError(f"Provide a correct path to {self.gram_ckpt}")
             self.gram_teacher.requires_grad_(False)
             self.gram_teacher.eval()
+
         if self.cfg.student.resume_from_teacher_chkpt:
             logger.info(f"Loading pretrained weights from {self.cfg.student.resume_from_teacher_chkpt}")
             init_fsdp_model_from_checkpoint(
@@ -707,21 +726,41 @@ class SSLMetaArch(nn.Module):
         loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
 
-        if self.sigreg_use_loss:
+        if self.sigreg_on_cls:
             sigreg_views = torch.cat(
                 [student_global["cls_pre_head"], student_local["cls_pre_head"]],
                 dim=0,
             )
-            sigreg_loss = self.sigreg_loss(sigreg_views)
-            loss_dict["sigreg_loss"] = sigreg_loss
-            loss_dict["sigreg_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_loss_weight)
+
+            sigreg_loss = self.sigreg_cls_loss(sigreg_views)
+            loss_dict["sigreg_cls_loss"] = sigreg_loss
+            loss_dict["sigreg_cls_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_cls_loss_weight)
             sigreg_samples = sigreg_views.flatten(0, 1)
             loss_dict["sigreg_cls_std_mean"] = std_mean(sigreg_samples)
             loss_dict["sigreg_cls_std_min"] = std_min(sigreg_samples)
             if iteration % 100 == 0:
                 loss_dict["sigreg_cls_pairwise_cos_mean"] = pairwise_cos_mean(sigreg_samples)
                 loss_dict["sigreg_cls_effective_rank"] = effective_rank(sigreg_samples)
-            loss_accumulator += self.sigreg_loss_weight * sigreg_loss
+            loss_accumulator += self.sigreg_cls_loss_weight * sigreg_loss
+
+        if self.sigreg_on_patch:
+            sigreg_views = torch.cat(
+                [student_global["patch_pre_head"], student_local["patch_pre_head"]],
+                dim=0,
+            )
+
+            sigreg_loss = self.sigreg_patch_loss(sigreg_views)
+            loss_dict["sigreg_patch_loss"] = sigreg_loss
+            loss_dict["sigreg_patch_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_patch_loss_weight)
+            if getattr(self.sigreg_patch_loss, "n_patches", None) is not None:
+                sigreg_views = self.sigreg_patch_loss.sample_patch_tokens(sigreg_views)
+            sigreg_samples = sigreg_views.reshape(-1, sigreg_views.shape[-1])  # [N, D]
+            loss_dict["sigreg_patch_std_mean"] = std_mean(sigreg_samples)
+            loss_dict["sigreg_patch_std_min"] = std_min(sigreg_samples)
+            if iteration % 200 == 0:
+                loss_dict["sigreg_patch_pairwise_cos_mean"] = pairwise_cos_mean(sigreg_samples)
+                loss_dict["sigreg_patch_effective_rank"] = effective_rank(sigreg_samples)
+            loss_accumulator += self.sigreg_patch_loss_weight * sigreg_loss
 
         if self.koleo_enabled:
             # Koleo: regularize pre-head CLS tokens of student(global crops)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 from jaxtyping import Float
@@ -17,6 +19,7 @@ class SIGReg(nn.Module):
         n_knots: int = 17,
         t_max: float = 3.0,
         n_slices: int = 1024,
+        n_patches: Optional[int] = None,
     ):
         """
         Args:
@@ -29,6 +32,7 @@ class SIGReg(nn.Module):
         self.n_knots = n_knots
         self.t_max = t_max
         self.n_slices = n_slices
+        self.n_patches = n_patches
 
         if n_knots < 2:
             raise ValueError("SIGReg requires n_knots >= 2")
@@ -53,8 +57,27 @@ class SIGReg(nn.Module):
         self.phi.copy_(w_t)  # set target CF to also be w_t
         self.weights.copy_(weights * w_t)
 
-    def forward(self, proj: Float[Tensor, "V B D"]) -> Float[Tensor, ""]:  # noqa: F722
-        samples = proj.flatten(0, 1).float()
+    def sample_patch_tokens(self, proj: Float[Tensor, "V ... D"]) -> Float[Tensor, "V ... D"]:
+        if self.n_patches is None:
+            return proj
+
+        if proj.ndim < 4:
+            raise ValueError(
+                f"n_patches was set, but input does not look patch-shaped. "
+                f"Expected [V, B, P, D], got {tuple(proj.shape)}"
+            )
+
+        P = proj.shape[-2]
+        K = min(self.n_patches, P)
+        idx = torch.randperm(P, device=proj.device)[:K]
+        return proj.index_select(dim=-2, index=idx)
+
+    def forward(self, proj: Float[Tensor, "V ... D"]) -> Float[Tensor, ""]:  # noqa: F722
+        if self.n_patches is not None:
+            proj = self.sample_patch_tokens(proj)
+
+        samples = proj.reshape(-1, proj.shape[-1])  # [N, D]
+
         slices = torch.randn(samples.size(-1), self.n_slices, device=samples.device, dtype=samples.dtype)
         slices = slices.div_(slices.norm(p=2, dim=0, keepdim=True).clamp_min(1e-12))
 

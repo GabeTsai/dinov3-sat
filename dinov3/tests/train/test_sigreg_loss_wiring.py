@@ -11,12 +11,18 @@ class _DINOLossStub:
 
 
 class _SIGRegStub:
-    def __init__(self):
+    def __init__(self, n_patches=None):
         self.seen_shape = None
+        self.n_patches = n_patches
 
     def __call__(self, views):
         self.seen_shape = tuple(views.shape)
         return views.sum() * 0 + 2.0
+
+    def sample_patch_tokens(self, views):
+        if self.n_patches is None:
+            return views
+        return views[:, :, : self.n_patches]
 
 
 def _build_arch_for_compute_losses():
@@ -29,8 +35,10 @@ def _build_arch_for_compute_losses():
     arch.ibot_loss_weight = 0.0
     arch.koleo_enabled = False
     arch.ibot_enabled = False
-    arch.sigreg_use_loss = False
-    arch.sigreg_loss_weight = 0.0
+    arch.sigreg_on_cls = False
+    arch.sigreg_on_patch = False
+    arch.sigreg_cls_loss_weight = 0.0
+    arch.sigreg_patch_loss_weight = 0.0
     arch.gram_use_loss = False
     return arch
 
@@ -39,10 +47,12 @@ def _loss_inputs():
     student_global = {
         "cls_after_head": torch.zeros(2, 3, 5, requires_grad=True),
         "cls_pre_head": torch.ones(2, 3, 4, requires_grad=True),
+        "patch_pre_head": torch.ones(2, 3, 7, 4, requires_grad=True),
     }
     student_local = {
         "cls_after_head": torch.zeros(4, 3, 5, requires_grad=True),
         "cls_pre_head": torch.ones(4, 3, 4, requires_grad=True),
+        "patch_pre_head": torch.ones(4, 3, 7, 4, requires_grad=True),
     }
     teacher_global = {"cls_centered": torch.zeros(2, 3, 5)}
     return dict(
@@ -69,15 +79,15 @@ def test_zero_koleo_ibot_loss():
 
 def test_sigreg_uses_student_global_local_cls_pre_head_views():
     arch = _build_arch_for_compute_losses()
-    arch.sigreg_use_loss = True
-    arch.sigreg_loss_weight = 0.25
-    arch.sigreg_loss = _SIGRegStub()
+    arch.sigreg_on_cls = True
+    arch.sigreg_cls_loss_weight = 0.25
+    arch.sigreg_cls_loss = _SIGRegStub()
 
     loss, loss_dict = arch.compute_losses(**_loss_inputs())
 
-    assert arch.sigreg_loss.seen_shape == (6, 3, 4)
-    assert loss_dict["sigreg_loss"].item() == 2.0
-    assert loss_dict["sigreg_loss_weight"].item() == 0.25
+    assert arch.sigreg_cls_loss.seen_shape == (6, 3, 4)
+    assert loss_dict["sigreg_cls_loss"].item() == 2.0
+    assert loss_dict["sigreg_cls_loss_weight"].item() == 0.25
     assert loss.item() == 0.5
     assert "sigreg_cls_std_mean" in loss_dict
     assert "sigreg_cls_std_min" in loss_dict
@@ -87,9 +97,9 @@ def test_sigreg_uses_student_global_local_cls_pre_head_views():
 
 def test_sigreg_expensive_metrics_are_rate_limited():
     arch = _build_arch_for_compute_losses()
-    arch.sigreg_use_loss = True
-    arch.sigreg_loss_weight = 0.25
-    arch.sigreg_loss = _SIGRegStub()
+    arch.sigreg_on_cls = True
+    arch.sigreg_cls_loss_weight = 0.25
+    arch.sigreg_cls_loss = _SIGRegStub()
     inputs = _loss_inputs()
     inputs["iteration"] = 1
 
@@ -99,6 +109,50 @@ def test_sigreg_expensive_metrics_are_rate_limited():
     assert "sigreg_cls_std_min" in loss_dict
     assert "sigreg_cls_pairwise_cos_mean" not in loss_dict
     assert "sigreg_cls_effective_rank" not in loss_dict
+
+
+def test_sigreg_patch_preserves_patch_token_axis():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_on_patch = True
+    arch.sigreg_patch_loss_weight = 0.125
+    arch.sigreg_patch_loss = _SIGRegStub()
+    inputs = _loss_inputs()
+    inputs["iteration"] = 1
+
+    loss, loss_dict = arch.compute_losses(**inputs)
+
+    assert arch.sigreg_patch_loss.seen_shape == (6, 3, 7, 4)
+    assert loss_dict["sigreg_patch_loss"].item() == 2.0
+    assert loss_dict["sigreg_patch_loss_weight"].item() == 0.125
+    assert loss.item() == 0.25
+    assert "sigreg_patch_std_mean" in loss_dict
+    assert "sigreg_patch_std_min" in loss_dict
+
+
+def test_sigreg_patch_expensive_metrics_use_flattened_samples():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_on_patch = True
+    arch.sigreg_patch_loss_weight = 0.125
+    arch.sigreg_patch_loss = _SIGRegStub()
+
+    _, loss_dict = arch.compute_losses(**_loss_inputs())
+
+    assert arch.sigreg_patch_loss.seen_shape == (6, 3, 7, 4)
+    assert "sigreg_patch_pairwise_cos_mean" in loss_dict
+    assert "sigreg_patch_effective_rank" in loss_dict
+
+
+def test_sigreg_patch_metrics_respect_patch_sampling():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_on_patch = True
+    arch.sigreg_patch_loss_weight = 0.125
+    arch.sigreg_patch_loss = _SIGRegStub(n_patches=2)
+
+    _, loss_dict = arch.compute_losses(**_loss_inputs())
+
+    assert arch.sigreg_patch_loss.seen_shape == (6, 3, 7, 4)
+    assert torch.isfinite(loss_dict["sigreg_patch_std_mean"])
+    assert torch.isfinite(loss_dict["sigreg_patch_pairwise_cos_mean"])
 
 
 def test_zero_ibot_weight_disables_masking_unless_forced():
