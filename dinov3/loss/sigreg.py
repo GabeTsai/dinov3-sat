@@ -57,8 +57,13 @@ class SIGReg(nn.Module):
         self.phi.copy_(w_t)  # set target CF to also be w_t
         self.weights.copy_(weights * w_t)
 
-    def sample_patch_tokens(self, proj: Float[Tensor, "V ... D"]) -> Float[Tensor, "V ... D"]:
-        if self.n_patches is None:
+    def sample_patch_tokens(
+        self,
+        proj: Tensor,
+        n_patches: Optional[int] = None,
+    ) -> Tensor:
+        n_patches = self.n_patches if n_patches is None else n_patches
+        if n_patches is None:
             return proj
 
         if proj.ndim < 4:
@@ -68,7 +73,7 @@ class SIGReg(nn.Module):
             )
 
         P = proj.shape[-2]
-        K = min(self.n_patches, P)
+        K = min(n_patches, P)
         idx = torch.randperm(P, device=proj.device)[:K]
         return proj.index_select(dim=-2, index=idx)
 

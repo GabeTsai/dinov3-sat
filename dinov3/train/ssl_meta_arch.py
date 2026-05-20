@@ -744,23 +744,39 @@ class SSLMetaArch(nn.Module):
             loss_accumulator += self.sigreg_cls_loss_weight * sigreg_loss
 
         if self.sigreg_on_patch:
-            sigreg_views = torch.cat(
-                [student_global["patch_pre_head"], student_local["patch_pre_head"]],
-                dim=0,
+            n_local_patches = student_local["patch_pre_head"].shape[-2]
+            n_global_patches = student_global["patch_pre_head"].shape[-2]
+            n_sigreg_patches = getattr(self.sigreg_patch_loss, "n_patches", None)
+            n_patch_samples = min(n_local_patches, n_global_patches)
+            if n_sigreg_patches is not None:
+                n_patch_samples = min(n_sigreg_patches, n_patch_samples)
+            sampled_global_patches = self.sigreg_patch_loss.sample_patch_tokens(
+                student_global["patch_pre_head"],
+                n_patch_samples,
+            )
+            sampled_local_patches = self.sigreg_patch_loss.sample_patch_tokens(
+                student_local["patch_pre_head"],
+                n_patch_samples,
             )
 
-            sigreg_loss = self.sigreg_patch_loss(sigreg_views)
-            loss_dict["sigreg_patch_loss"] = sigreg_loss
-            loss_dict["sigreg_patch_loss_weight"] = sigreg_loss.new_tensor(self.sigreg_patch_loss_weight)
-            if getattr(self.sigreg_patch_loss, "n_patches", None) is not None:
-                sigreg_views = self.sigreg_patch_loss.sample_patch_tokens(sigreg_views)
-            sigreg_samples = sigreg_views.reshape(-1, sigreg_views.shape[-1])  # [N, D]
-            loss_dict["sigreg_patch_std_mean"] = std_mean(sigreg_samples)
-            loss_dict["sigreg_patch_std_min"] = std_min(sigreg_samples)
-            if iteration % 200 == 0:
-                loss_dict["sigreg_patch_pairwise_cos_mean"] = pairwise_cos_mean(sigreg_samples)
-                loss_dict["sigreg_patch_effective_rank"] = effective_rank(sigreg_samples)
-            loss_accumulator += self.sigreg_patch_loss_weight * sigreg_loss
+            local_loss = self.sigreg_patch_loss(sampled_local_patches)
+            global_loss = self.sigreg_patch_loss(sampled_global_patches)
+
+            patch_loss_inputs = [
+                ("global", sampled_global_patches, global_loss),
+                ("local", sampled_local_patches, local_loss),
+            ]
+            for view_type, sampled_patches, loss in patch_loss_inputs:
+                loss_dict[f"sigreg_patch_{view_type}_loss"] = loss
+                loss_dict[f"sigreg_patch_{view_type}_loss_weight"] = loss.new_tensor(self.sigreg_patch_loss_weight)
+                sigreg_samples = sampled_patches.reshape(-1, sampled_patches.shape[-1])  # [N, D]
+
+                loss_dict[f"sigreg_patch_{view_type}_std_mean"] = std_mean(sigreg_samples)
+                loss_dict[f"sigreg_patch_{view_type}_std_min"] = std_min(sigreg_samples)
+                if iteration % 200 == 0:
+                    loss_dict[f"sigreg_patch_{view_type}_pairwise_cos_mean"] = pairwise_cos_mean(sigreg_samples)
+                    loss_dict[f"sigreg_patch_{view_type}_effective_rank"] = effective_rank(sigreg_samples)
+            loss_accumulator += self.sigreg_patch_loss_weight * 0.5 * (global_loss + local_loss)
 
         if self.koleo_enabled:
             # Koleo: regularize pre-head CLS tokens of student(global crops)
