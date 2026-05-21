@@ -45,6 +45,8 @@ ibot:
 sigreg:
   cls_loss_weight: 0.0
   patch_loss_weight: 0.0
+  use_proj: false
+  proj_dim: 256
   n_knots: 17
   t_max: 3.0
   n_slices: 1024

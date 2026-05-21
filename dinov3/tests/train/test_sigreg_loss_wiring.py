@@ -1,6 +1,9 @@
 import torch
 from omegaconf import OmegaConf
+from torch import nn
 
+import dinov3.train.ssl_meta_arch as ssl_meta_arch
+from dinov3.layers.ffn_layers import Mlp
 from dinov3.loss import SIGReg
 from dinov3.train.ssl_meta_arch import SSLMetaArch
 from dinov3.train.train import get_effective_ibot_mask_probability
@@ -29,6 +32,15 @@ class _SIGRegStub:
         return views[:, :, :n_patches]
 
 
+class _ProjectionStub(nn.Module):
+    def __init__(self, out_dim):
+        super().__init__()
+        self.out_dim = out_dim
+
+    def forward(self, x):
+        return x[..., : self.out_dim]
+
+
 class _RecordingSIGReg(SIGReg):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -41,6 +53,7 @@ class _RecordingSIGReg(SIGReg):
 
 def _build_arch_for_compute_losses():
     arch = SSLMetaArch.__new__(SSLMetaArch)
+    nn.Module.__init__(arch)
     arch.dino_loss = _DINOLossStub()
     arch.cfg = OmegaConf.create({"dino": {"reweight_dino_local_loss": False}})
     arch.dino_loss_weight = 1.0
@@ -54,7 +67,80 @@ def _build_arch_for_compute_losses():
     arch.sigreg_cls_loss_weight = 0.0
     arch.sigreg_patch_loss_weight = 0.0
     arch.gram_use_loss = False
+    arch.student = nn.ModuleDict()
     return arch
+
+
+class _TinyBackbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(()))
+
+    def init_weights(self):
+        pass
+
+
+class _TinyHead(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        in_dim = kwargs["in_dim"]
+        out_dim = kwargs["out_dim"]
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def init_weights(self):
+        pass
+
+
+class _TinyLoss:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+def _minimal_ssl_cfg(cls_loss_weight=0.0, patch_loss_weight=0.0, use_proj=False):
+    return OmegaConf.create(
+        {
+            "compute_precision": {"sharding_strategy": "SHARD_GRAD_OP"},
+            "train": {"centering": "sinkhorn_knopp"},
+            "crops": {"local_crops_number": 2},
+            "dino": {
+                "loss_weight": 1.0,
+                "global_ignore_diagonal": True,
+                "head_n_prototypes": 5,
+                "head_bottleneck_dim": 4,
+                "head_norm_last_layer": False,
+                "head_nlayers": 2,
+                "head_hidden_dim": 8,
+                "koleo_loss_weight": 0.0,
+                "koleo_loss_distributed": False,
+                "koleo_topk": 1,
+                "reweight_dino_local_loss": False,
+            },
+            "ibot": {
+                "loss_weight": 0.0,
+                "mask_sample_probability": 0.1,
+                "mask_ratio_min_max": [0.1, 0.2],
+                "separate_head": True,
+                "head_n_prototypes": 5,
+                "head_bottleneck_dim": 4,
+                "head_norm_last_layer": False,
+                "head_nlayers": 2,
+                "head_hidden_dim": 8,
+            },
+            "sigreg": {
+                "cls_loss_weight": cls_loss_weight,
+                "patch_loss_weight": patch_loss_weight,
+                "use_proj": use_proj,
+                "proj_dim": 256,
+                "n_knots": 3,
+                "t_max": 1.0,
+                "n_slices": 4,
+                "n_patches": None,
+            },
+            "distillation": {"enabled": False},
+            "gram": {"use_loss": False},
+            "student": {"arch": "tiny"},
+        }
+    )
 
 
 def _loss_inputs(global_patches=7, local_patches=7, dim=4):
@@ -79,6 +165,32 @@ def _loss_inputs(global_patches=7, local_patches=7, dim=4):
         masks_weight=torch.empty(0),
         iteration=0,
     )
+
+
+def test_sigreg_proj_modules_created_only_for_enabled_sigreg_losses(monkeypatch):
+    def build_model_from_cfg(cfg, only_teacher=False):
+        if only_teacher:
+            return _TinyBackbone(), 4
+        return _TinyBackbone(), _TinyBackbone(), 4
+
+    monkeypatch.setattr(ssl_meta_arch, "build_model_from_cfg", build_model_from_cfg)
+    monkeypatch.setattr(ssl_meta_arch, "DINOHead", _TinyHead)
+    monkeypatch.setattr(ssl_meta_arch, "DINOLoss", _TinyLoss)
+    monkeypatch.setattr(ssl_meta_arch, "iBOTPatchLoss", _TinyLoss)
+
+    cls_only = SSLMetaArch(_minimal_ssl_cfg(cls_loss_weight=0.2, patch_loss_weight=0.0, use_proj=True))
+    assert isinstance(cls_only.student["sigreg_cls_proj"], Mlp)
+    assert cls_only.student["sigreg_cls_proj"].fc2.out_features == 256
+    assert "sigreg_patch_proj" not in cls_only.student
+
+    patch_only = SSLMetaArch(_minimal_ssl_cfg(cls_loss_weight=0.0, patch_loss_weight=0.2, use_proj=True))
+    assert "sigreg_cls_proj" not in patch_only.student
+    assert isinstance(patch_only.student["sigreg_patch_proj"], Mlp)
+    assert patch_only.student["sigreg_patch_proj"].fc2.out_features == 256
+
+    disabled = SSLMetaArch(_minimal_ssl_cfg(cls_loss_weight=0.0, patch_loss_weight=0.0, use_proj=True))
+    assert "sigreg_cls_proj" not in disabled.student
+    assert "sigreg_patch_proj" not in disabled.student
 
 
 def test_zero_koleo_ibot_loss():
@@ -125,6 +237,20 @@ def test_sigreg_expensive_metrics_are_rate_limited():
     assert "sigreg_cls_effective_rank" not in loss_dict
 
 
+def test_sigreg_cls_projection_is_used_for_loss_and_metrics():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_on_cls = True
+    arch.sigreg_cls_loss_weight = 0.25
+    arch.sigreg_cls_loss = _SIGRegStub()
+    arch.student["sigreg_cls_proj"] = _ProjectionStub(out_dim=2)
+
+    _, loss_dict = arch.compute_losses(**_loss_inputs())
+
+    assert arch.sigreg_cls_loss.seen_shape == (6, 3, 2)
+    assert torch.isfinite(loss_dict["sigreg_cls_std_mean"])
+    assert torch.isfinite(loss_dict["sigreg_cls_effective_rank"])
+
+
 def test_sigreg_patch_samples_to_common_patch_count():
     arch = _build_arch_for_compute_losses()
     arch.sigreg_on_patch = True
@@ -143,6 +269,20 @@ def test_sigreg_patch_samples_to_common_patch_count():
     assert loss.item() == 0.25
     assert "sigreg_patch_local_std_mean" in loss_dict
     assert "sigreg_patch_global_std_mean" in loss_dict
+
+
+def test_sigreg_patch_projection_is_used_after_patch_sampling():
+    arch = _build_arch_for_compute_losses()
+    arch.sigreg_on_patch = True
+    arch.sigreg_patch_loss_weight = 0.125
+    arch.sigreg_patch_loss = _SIGRegStub(n_patches=2)
+    arch.student["sigreg_patch_proj"] = _ProjectionStub(out_dim=3)
+
+    _, loss_dict = arch.compute_losses(**_loss_inputs(global_patches=7, local_patches=5, dim=4))
+
+    assert arch.sigreg_patch_loss.seen_shapes == [(4, 3, 2, 3), (2, 3, 2, 3)]
+    assert torch.isfinite(loss_dict["sigreg_patch_local_std_mean"])
+    assert torch.isfinite(loss_dict["sigreg_patch_global_effective_rank"])
 
 
 def test_sigreg_patch_expensive_metrics_use_flattened_samples():

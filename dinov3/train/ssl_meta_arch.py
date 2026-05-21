@@ -17,6 +17,7 @@ from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
+from dinov3.layers.ffn_layers import Mlp
 from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, SIGReg, iBOTPatchLoss
 from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import (
@@ -157,10 +158,14 @@ class SSLMetaArch(nn.Module):
         self.sigreg_on_patch = self.cfg.sigreg.patch_loss_weight > 0
         self.sigreg_cls_loss_weight = self.cfg.sigreg.cls_loss_weight
         self.sigreg_patch_loss_weight = self.cfg.sigreg.patch_loss_weight
+        self.sigreg_use_proj = self.cfg.sigreg.use_proj
 
         logger.info("OPTIONS -- SIGREG")
         logger.info(f"OPTIONS -- SIGREG -- on_cls: {self.sigreg_on_cls}")
         logger.info(f"OPTIONS -- SIGREG -- on_patch: {self.sigreg_on_patch}")
+        logger.info(f"OPTIONS -- SIGREG -- use_proj: {self.sigreg_use_proj}")
+        if self.sigreg_use_proj:
+            logger.info(f"OPTIONS -- SIGREG -- proj_dim: {self.cfg.sigreg.proj_dim}")
         if self.sigreg_on_cls:
             logger.info(f"OPTIONS -- SIGREG -- cls_loss_weight: {self.cfg.sigreg.cls_loss_weight}")
         if self.sigreg_on_patch:
@@ -177,6 +182,8 @@ class SSLMetaArch(nn.Module):
                 n_slices=self.cfg.sigreg.n_slices,
                 n_patches=None,
             )
+            if self.sigreg_use_proj:
+                self.student["sigreg_cls_proj"] = Mlp(embed_dim, out_features=self.cfg.sigreg.proj_dim)
         if self.sigreg_on_patch:
             self.sigreg_patch_loss = SIGReg(
                 n_knots=self.cfg.sigreg.n_knots,
@@ -184,6 +191,8 @@ class SSLMetaArch(nn.Module):
                 n_slices=self.cfg.sigreg.n_slices,
                 n_patches=self.cfg.sigreg.n_patches,
             )
+            if self.sigreg_use_proj:
+                self.student["sigreg_patch_proj"] = Mlp(embed_dim, out_features=self.cfg.sigreg.proj_dim)
 
         # Local loss reweighting
         if self.cfg.dino.reweight_dino_local_loss:
@@ -362,7 +371,7 @@ class SSLMetaArch(nn.Module):
             self.sigreg_cls_loss.init_weights()
         if self.sigreg_on_patch:
             self.sigreg_patch_loss.init_weights()
-        self.model_ema.load_state_dict(self.student.state_dict())
+        self._load_model_ema_from_student()
         if self.has_gram_teacher:
             resume_has_gram_teacher = (
                 not skip_resume_gram_teacher
@@ -424,7 +433,7 @@ class SSLMetaArch(nn.Module):
                 process_group=distributed.get_process_subgroup(),
                 patch_embed_in_chans=self.cfg.student.in_chans or None,
             )
-            self.model_ema.load_state_dict(self.student.state_dict())
+            self._load_model_ema_from_student()
         if self.cfg.distillation.enabled:
             if self.cfg.distillation.checkpoint_path != "ignore":
                 logger.info(f"Loading teacher to distil from : {self.cfg.distillation.checkpoint_path}")
@@ -731,6 +740,8 @@ class SSLMetaArch(nn.Module):
                 [student_global["cls_pre_head"], student_local["cls_pre_head"]],
                 dim=0,
             )
+            if "sigreg_cls_proj" in self.student:
+                sigreg_views = self.student.sigreg_cls_proj(sigreg_views)
 
             sigreg_loss = self.sigreg_cls_loss(sigreg_views)
             loss_dict["sigreg_cls_loss"] = sigreg_loss
@@ -758,6 +769,9 @@ class SSLMetaArch(nn.Module):
                 student_local["patch_pre_head"],
                 n_patch_samples,
             )
+            if "sigreg_patch_proj" in self.student:
+                sampled_global_patches = self.student.sigreg_patch_proj(sampled_global_patches)
+                sampled_local_patches = self.student.sigreg_patch_proj(sampled_local_patches)
 
             local_loss = self.sigreg_patch_loss(sampled_local_patches)
             global_loss = self.sigreg_patch_loss(sampled_global_patches)
@@ -867,6 +881,8 @@ class SSLMetaArch(nn.Module):
             student_param_list = []
             teacher_param_list = []
             for k in self.student.keys():
+                if k not in self.model_ema:
+                    continue
                 for ms, mt in zip(self.student[k].parameters(), self.model_ema[k].parameters()):
                     student_param_list += [ms]
                     teacher_param_list += [mt]
@@ -876,6 +892,13 @@ class SSLMetaArch(nn.Module):
         with torch.no_grad():
             torch._foreach_mul_(teacher_param_list, m)
             torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
+
+    def _load_model_ema_from_student(self):
+        model_ema_state = self.model_ema.state_dict()
+        self.model_ema.load_state_dict(
+            {k: v for k, v in self.student.state_dict().items() if k in model_ema_state},
+            strict=False,
+        )
 
     def update_gram(self, m=0):
         if not self.has_gram_teacher:
