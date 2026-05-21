@@ -51,15 +51,13 @@ def pairwise_cos_mean(x: torch.Tensor) -> torch.Tensor:
     Returns:
         scalar tensor
     """
-    x = F.normalize(x.float(), dim=-1)  # [B, D]
-    sim = x @ x.T                      # [B, B]
-
     B = x.shape[0]
     if B <= 1:
         return torch.tensor(0.0, device=x.device)
 
-    mask = ~torch.eye(B, dtype=torch.bool, device=x.device)
-    return sim[mask].mean()
+    x = F.normalize(x.float(), dim=-1)  # [B, D]
+    sum_cos = x.sum(dim=0).square().sum() - B
+    return sum_cos / (B * (B - 1))
 
 
 @torch.no_grad()
@@ -92,9 +90,12 @@ def effective_rank(
 
     x = x - x.mean(dim=0, keepdim=True)  # [B, D]
 
-    # Eigenvalues are proportional to singular values squared.
-    s = torch.linalg.svdvals(x)          # [min(B, D)]
-    eigvals = s.square()
+    # Eigenvalues are proportional to singular values squared. Form the smaller Gram matrix to keep
+    # patch-token diagnostics bounded by the projected embedding dimension instead of sample count.
+    if B >= x.shape[1]:
+        eigvals = torch.linalg.eigvalsh(x.T @ x)
+    else:
+        eigvals = torch.linalg.eigvalsh(x @ x.T)
 
     eigvals = eigvals[eigvals > eps]
     if eigvals.numel() == 0:
