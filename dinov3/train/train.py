@@ -801,6 +801,10 @@ def main(argv=None):
             config=_cfg_dict,
             dir=args.output_dir,
         )
+
+        if getattr(args, "wandb", False) and distributed.is_enabled():
+            torch.distributed.barrier()
+            
         logger.info("W&B run initialized: %s", _wandb.run.url)
     meta_arch = {
         "SSLMetaArch": SSLMetaArch,
