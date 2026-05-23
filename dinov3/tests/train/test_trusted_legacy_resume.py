@@ -126,6 +126,47 @@ def test_get_wandb_resume_kwargs_rejects_negative_rewind_step():
         train.get_wandb_resume_kwargs("abc123", -1)
 
 
+def test_main_barriers_on_non_main_distributed_wandb_rank(monkeypatch, tmp_path):
+    args = SimpleNamespace(
+        output_dir=str(tmp_path),
+        seed=0,
+        multi_distillation=False,
+        no_resume=True,
+        eval_only=False,
+        wandb=True,
+        wandb_rewind_step=None,
+    )
+    cfg = SimpleNamespace(
+        MODEL=SimpleNamespace(META_ARCHITECTURE="SSLMetaArch"),
+    )
+    barrier_calls = []
+
+    class Parser:
+        def parse_args(self):
+            return args
+
+    def stop_after_barrier(_cfg):
+        assert barrier_calls == ["barrier"]
+        raise RuntimeError("stop after wandb barrier")
+
+    monkeypatch.setattr(train, "get_args_parser", lambda: Parser())
+    monkeypatch.setattr(train, "setup_job", lambda output_dir, seed: None)
+    monkeypatch.setattr(train, "setup_config", lambda args, strict_cfg: cfg)
+    monkeypatch.setattr(train, "apply_saved_schedule_state", lambda cfg, schedule_state: None)
+    monkeypatch.setattr(train, "persist_schedule_state", lambda output_dir, schedule_state: None)
+    monkeypatch.setattr(train, "get_schedule_state", lambda cfg: {"schedule_epochs": 0, "schedule_total_iterations": 0})
+    monkeypatch.setattr(train, "setup_logging", lambda **kwargs: None)
+    monkeypatch.setattr(train.distributed, "is_main_process", lambda: False)
+    monkeypatch.setattr(train.distributed, "is_enabled", lambda: True)
+    monkeypatch.setattr(train.torch.distributed, "barrier", lambda: barrier_calls.append("barrier"))
+    monkeypatch.setattr(train, "SSLMetaArch", stop_after_barrier)
+
+    with pytest.raises(RuntimeError, match="stop after wandb barrier"):
+        train.main()
+
+    assert barrier_calls == ["barrier"]
+
+
 def test_do_train_passes_trusted_legacy_resume_to_load_checkpoint(monkeypatch, tmp_path):
     cfg = SimpleNamespace(
         train=SimpleNamespace(output_dir=str(tmp_path), OFFICIAL_EPOCH_LENGTH=1, batch_size_per_gpu=1),

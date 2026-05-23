@@ -820,10 +820,9 @@ def main(argv=None):
             dir=args.output_dir,
         )
 
-        if getattr(args, "wandb", False) and distributed.is_enabled():
-            torch.distributed.barrier()
-            
         logger.info("W&B run initialized: %s", _wandb.run.url)
+    if getattr(args, "wandb", False) and distributed.is_enabled():
+        torch.distributed.barrier()
     meta_arch = {
         "SSLMetaArch": SSLMetaArch,
         "MultiDistillationMetaArch": MultiDistillationMetaArch,
