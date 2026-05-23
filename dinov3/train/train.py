@@ -127,6 +127,14 @@ def apply_saved_schedule_state(cfg, schedule_state: dict[str, int] | None) -> No
         cfg.optim.schedule_total_iterations = int(schedule_state["schedule_total_iterations"])
 
 
+def get_wandb_resume_kwargs(run_id: str, rewind_step: int | None) -> dict[str, str]:
+    if rewind_step is None:
+        return {"id": run_id, "resume": "allow"}
+    if rewind_step < 0:
+        raise ValueError("--wandb-rewind-step must be non-negative")
+    return {"resume_from": f"{run_id}?_step={rewind_step}"}
+
+
 def get_args_parser(add_help: bool = True):
     parser = argparse.ArgumentParser("DINOv3 training", add_help=add_help)
     parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
@@ -179,6 +187,9 @@ For python-based LazyConfig, use "path.key=value".
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project", default="dinov3-sat", type=str, help="W&B project name.")
     parser.add_argument("--wandb-run-name", default=None, type=str, help="W&B run name (optional).")
+    parser.add_argument("--wandb-rewind-step", default=None, type=int, 
+        help="Rewind resumed W&B run history to this step before logging new data.",
+    )
 
     return parser
 
@@ -776,14 +787,22 @@ def main(argv=None):
             output=os.path.join(os.path.abspath(args.output_dir), "nan_logs"),
             name="nan_logger",
         )
-    
-    # Resume W&B run if it exists
+
+    if getattr(args, "wandb_rewind_step", None) is not None and not getattr(args, "wandb", False):
+        raise ValueError("--wandb-rewind-step requires --wandb")
+
+    # Resume or rewind W&B run if it exists
     if getattr(args, "wandb", False) and distributed.is_main_process():
         _wandb_id_file = Path(args.output_dir) / "wandb_run_id.json"
-        _wandb_resume = "allow"
+        _wandb_rewind_step = getattr(args, "wandb_rewind_step", None)
         _wandb_id = None
         if _wandb_id_file.exists():
             _wandb_id = json.loads(_wandb_id_file.read_text()).get("run_id")
+        if _wandb_rewind_step is not None and _wandb_id is None:
+            raise ValueError(
+                "--wandb-rewind-step requires an existing W&B run id in "
+                f"{_wandb_id_file}; start the run once with --wandb before rewinding it."
+            )
         if _wandb_id is None:
             _wandb_id = _wandb.util.generate_id()
             _wandb_id_file.parent.mkdir(parents=True, exist_ok=True)
@@ -796,8 +815,7 @@ def main(argv=None):
         _wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name,
-            id=_wandb_id,
-            resume=_wandb_resume,
+            **get_wandb_resume_kwargs(_wandb_id, _wandb_rewind_step),
             config=_cfg_dict,
             dir=args.output_dir,
         )

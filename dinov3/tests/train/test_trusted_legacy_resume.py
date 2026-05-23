@@ -106,6 +106,26 @@ def test_get_args_parser_parses_trusted_legacy_resume_flag():
     assert args.trusted_legacy_resume is True
 
 
+def test_get_args_parser_parses_wandb_rewind_step():
+    args = train.get_args_parser().parse_args(["--wandb", "--wandb-rewind-step", "200"])
+
+    assert args.wandb is True
+    assert args.wandb_rewind_step == 200
+
+
+def test_get_wandb_resume_kwargs_uses_resume_from_for_rewind():
+    assert train.get_wandb_resume_kwargs("abc123", 200) == {"resume_from": "abc123?_step=200"}
+
+
+def test_get_wandb_resume_kwargs_uses_resume_for_normal_run():
+    assert train.get_wandb_resume_kwargs("abc123", None) == {"id": "abc123", "resume": "allow"}
+
+
+def test_get_wandb_resume_kwargs_rejects_negative_rewind_step():
+    with pytest.raises(ValueError, match="non-negative"):
+        train.get_wandb_resume_kwargs("abc123", -1)
+
+
 def test_do_train_passes_trusted_legacy_resume_to_load_checkpoint(monkeypatch, tmp_path):
     cfg = SimpleNamespace(
         train=SimpleNamespace(output_dir=str(tmp_path), OFFICIAL_EPOCH_LENGTH=1, batch_size_per_gpu=1),
