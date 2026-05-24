@@ -106,26 +106,6 @@ def test_get_args_parser_parses_trusted_legacy_resume_flag():
     assert args.trusted_legacy_resume is True
 
 
-def test_get_args_parser_parses_wandb_rewind_step():
-    args = train.get_args_parser().parse_args(["--wandb", "--wandb-rewind-step", "200"])
-
-    assert args.wandb is True
-    assert args.wandb_rewind_step == 200
-
-
-def test_get_wandb_resume_kwargs_uses_resume_from_for_rewind():
-    assert train.get_wandb_resume_kwargs("abc123", 200) == {"resume_from": "abc123?_step=200"}
-
-
-def test_get_wandb_resume_kwargs_uses_resume_for_normal_run():
-    assert train.get_wandb_resume_kwargs("abc123", None) == {"id": "abc123", "resume": "allow"}
-
-
-def test_get_wandb_resume_kwargs_rejects_negative_rewind_step():
-    with pytest.raises(ValueError, match="non-negative"):
-        train.get_wandb_resume_kwargs("abc123", -1)
-
-
 def test_main_barriers_on_non_main_distributed_wandb_rank(monkeypatch, tmp_path):
     args = SimpleNamespace(
         output_dir=str(tmp_path),
@@ -134,7 +114,6 @@ def test_main_barriers_on_non_main_distributed_wandb_rank(monkeypatch, tmp_path)
         no_resume=True,
         eval_only=False,
         wandb=True,
-        wandb_rewind_step=None,
     )
     cfg = SimpleNamespace(
         MODEL=SimpleNamespace(META_ARCHITECTURE="SSLMetaArch"),
