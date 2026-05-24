@@ -55,6 +55,7 @@ torch.backends.cudnn.benchmark = False  # True
 
 logger = logging.getLogger("dinov3")
 SCHEDULE_STATE_FILENAME = "schedule_state.json"
+WANDB_RUN_ID_FILENAME = "wandb_run_id.json"
 
 
 def get_effective_ibot_mask_probability(cfg):
@@ -118,6 +119,71 @@ def load_saved_schedule_state(output_dir: str | os.PathLike[str]) -> dict[str, i
     }
 
 
+def read_wandb_run_id(output_dir: str | os.PathLike[str]) -> str | None:
+    wandb_id_path = Path(output_dir) / WANDB_RUN_ID_FILENAME
+    if not wandb_id_path.exists():
+        return None
+    try:
+        wandb_id = json.loads(wandb_id_path.read_text()).get("run_id")
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Ignoring unreadable W&B run id file %s: %s", wandb_id_path, e)
+        return None
+    return wandb_id if isinstance(wandb_id, str) and wandb_id else None
+
+
+def write_wandb_run_id(output_dir: str | os.PathLike[str], run_id: str) -> None:
+    wandb_id_path = Path(output_dir) / WANDB_RUN_ID_FILENAME
+    wandb_id_path.parent.mkdir(parents=True, exist_ok=True)
+    wandb_id_path.write_text(json.dumps({"run_id": run_id}))
+
+
+def has_deleted_wandb_run_error(output_dir: str | os.PathLike[str]) -> bool:
+    log_paths = sorted((Path(output_dir) / "wandb").glob("run-*/logs/debug-internal.log"))
+    for log_path in reversed(log_paths[-3:]):
+        try:
+            log_text = log_path.read_text(errors="replace").lower()
+        except OSError:
+            continue
+        if "previously created and deleted" in log_text or "try a new run id" in log_text:
+            return True
+    return False
+
+
+def init_wandb(args, cfg):
+    existing_wandb_id = None if getattr(args, "wandb_new_run_id", False) else read_wandb_run_id(args.output_dir)
+    has_checkpoint = find_latest_checkpoint(Path(args.output_dir) / "ckpt") is not None
+    if existing_wandb_id and (getattr(args, "no_resume", False) or not has_checkpoint):
+        logger.info("Ignoring stored W&B run id because this launch is not resuming from a checkpoint.")
+        existing_wandb_id = None
+    wandb_id = existing_wandb_id or _wandb.util.generate_id()
+    _cfg_dict = {}
+    try:
+        _cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    except Exception as e:
+        logger.error(f"Error converting config to container: {e}")
+
+    init_kwargs = {
+        "project": args.wandb_project,
+        "name": args.wandb_run_name,
+        "resume": "allow",
+        "config": _cfg_dict,
+        "dir": args.output_dir,
+        "settings": _wandb.Settings(init_timeout=getattr(args, "wandb_init_timeout", 120)),
+    }
+
+    try:
+        _wandb.init(id=wandb_id, **init_kwargs)
+    except Exception:
+        if not existing_wandb_id or not has_deleted_wandb_run_error(args.output_dir):
+            raise
+        logger.warning("Stored W&B run id %s was deleted remotely; retrying with a new run id.", existing_wandb_id)
+        wandb_id = _wandb.util.generate_id()
+        _wandb.init(id=wandb_id, **init_kwargs)
+
+    write_wandb_run_id(args.output_dir, wandb_id)
+    logger.info("W&B run initialized: %s", _wandb.run.url)
+
+
 def apply_saved_schedule_state(cfg, schedule_state: dict[str, int] | None) -> None:
     if not schedule_state:
         return
@@ -179,6 +245,17 @@ For python-based LazyConfig, use "path.key=value".
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project", default="dinov3-sat", type=str, help="W&B project name.")
     parser.add_argument("--wandb-run-name", default=None, type=str, help="W&B run name (optional).")
+    parser.add_argument(
+        "--wandb-new-run-id",
+        action="store_true",
+        help="Ignore any stored W&B run id in the output directory and start a new W&B run.",
+    )
+    parser.add_argument(
+        "--wandb-init-timeout",
+        default=120,
+        type=int,
+        help="Seconds to wait for W&B init before surfacing an error or retrying stale run-id recovery.",
+    )
 
     return parser
 
@@ -777,32 +854,8 @@ def main(argv=None):
             name="nan_logger",
         )
 
-    # Resume W&B run if it exists
     if getattr(args, "wandb", False) and distributed.is_main_process():
-        _wandb_id_file = Path(args.output_dir) / "wandb_run_id.json"
-        _wandb_resume = "allow"
-        _wandb_id = None
-        if _wandb_id_file.exists():
-            _wandb_id = json.loads(_wandb_id_file.read_text()).get("run_id")
-        if _wandb_id is None:
-            _wandb_id = _wandb.util.generate_id()
-            _wandb_id_file.parent.mkdir(parents=True, exist_ok=True)
-            _wandb_id_file.write_text(json.dumps({"run_id": _wandb_id}))
-        _cfg_dict = {}
-        try:
-            _cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-        except Exception as e:
-            logger.error(f"Error converting config to container: {e}")
-        _wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            id=_wandb_id,
-            resume=_wandb_resume,
-            config=_cfg_dict,
-            dir=args.output_dir,
-        )
-
-        logger.info("W&B run initialized: %s", _wandb.run.url)
+        init_wandb(args, cfg)
     if getattr(args, "wandb", False) and distributed.is_enabled():
         torch.distributed.barrier()
     meta_arch = {

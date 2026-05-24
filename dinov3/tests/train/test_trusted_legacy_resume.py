@@ -106,6 +106,80 @@ def test_get_args_parser_parses_trusted_legacy_resume_flag():
     assert args.trusted_legacy_resume is True
 
 
+def test_init_wandb_ignores_stored_id_when_not_resuming_checkpoint(monkeypatch, tmp_path):
+    train.write_wandb_run_id(tmp_path, "old-id")
+    init_calls = []
+
+    class FakeWandb:
+        run = SimpleNamespace(url="https://wandb.test/new-id")
+        util = SimpleNamespace(generate_id=lambda: "new-id")
+
+        class Settings:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        @staticmethod
+        def init(**kwargs):
+            init_calls.append(kwargs)
+
+    args = SimpleNamespace(
+        output_dir=str(tmp_path),
+        wandb_new_run_id=False,
+        no_resume=False,
+        wandb_project="project",
+        wandb_run_name="name",
+        wandb_init_timeout=3,
+    )
+
+    monkeypatch.setattr(train, "_wandb", FakeWandb)
+    monkeypatch.setattr(train.OmegaConf, "to_container", lambda cfg, resolve: {"cfg": True})
+
+    train.init_wandb(args, SimpleNamespace())
+
+    assert [call["id"] for call in init_calls] == ["new-id"]
+    assert train.read_wandb_run_id(tmp_path) == "new-id"
+    assert init_calls[0]["settings"].kwargs == {"init_timeout": 3}
+
+
+def test_init_wandb_retries_deleted_stored_run_id(monkeypatch, tmp_path):
+    train.write_wandb_run_id(tmp_path, "old-id")
+    (tmp_path / "ckpt" / "1").mkdir(parents=True)
+    generated_ids = iter(["new-id"])
+    init_calls = []
+
+    class FakeWandb:
+        run = SimpleNamespace(url="https://wandb.test/new-id")
+        util = SimpleNamespace(generate_id=lambda: next(generated_ids))
+
+        class Settings:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        @staticmethod
+        def init(**kwargs):
+            init_calls.append(kwargs)
+            if kwargs["id"] == "old-id":
+                raise RuntimeError("wandb init timed out")
+
+    args = SimpleNamespace(
+        output_dir=str(tmp_path),
+        wandb_new_run_id=False,
+        no_resume=False,
+        wandb_project="project",
+        wandb_run_name="name",
+        wandb_init_timeout=3,
+    )
+
+    monkeypatch.setattr(train, "_wandb", FakeWandb)
+    monkeypatch.setattr(train.OmegaConf, "to_container", lambda cfg, resolve: {"cfg": True})
+    monkeypatch.setattr(train, "has_deleted_wandb_run_error", lambda output_dir: True)
+
+    train.init_wandb(args, SimpleNamespace())
+
+    assert [call["id"] for call in init_calls] == ["old-id", "new-id"]
+    assert train.read_wandb_run_id(tmp_path) == "new-id"
+
+
 def test_main_barriers_on_non_main_distributed_wandb_rank(monkeypatch, tmp_path):
     args = SimpleNamespace(
         output_dir=str(tmp_path),
