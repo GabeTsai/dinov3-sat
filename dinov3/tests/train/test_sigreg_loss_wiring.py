@@ -4,7 +4,7 @@ from torch import nn
 
 import dinov3.train.ssl_meta_arch as ssl_meta_arch
 from dinov3.layers.ffn_layers import Mlp
-from dinov3.loss import SIGReg
+from dinov3.loss import JEPALoss, SIGReg
 from dinov3.train.ssl_meta_arch import SSLMetaArch
 from dinov3.train.train import get_effective_ibot_mask_probability
 
@@ -34,13 +34,18 @@ class _SIGRegStub:
 
 class _JEPALossStub:
     def __init__(self):
-        self.seen_shape = None
-        self.seen_views = None
+        self.seen_global_shape = None
+        self.seen_local_shape = None
+        self.seen_global_views = None
+        self.seen_local_views = None
 
-    def __call__(self, views):
-        self.seen_shape = tuple(views.shape)
-        self.seen_views = views.detach().clone()
-        return views.sum() * 0 + 3.0
+    def __call__(self, global_views, local_views=None):
+        self.seen_global_shape = tuple(global_views.shape)
+        self.seen_global_views = global_views.detach().clone()
+        if local_views is not None:
+            self.seen_local_shape = tuple(local_views.shape)
+            self.seen_local_views = local_views.detach().clone()
+        return global_views.sum() * 0 + 3.0
 
 
 class _ProjectionStub(nn.Module):
@@ -74,6 +79,7 @@ def _build_arch_for_compute_losses():
     arch.koleo_enabled = False
     arch.ibot_enabled = False
     arch.jepa_enabled = False
+    arch.jepa_include_local = False
     arch.jepa_loss_weight = 0.0
     arch.sigreg_on_cls = False
     arch.sigreg_on_patch = False
@@ -149,7 +155,7 @@ def _minimal_ssl_cfg(cls_loss_weight=0.0, patch_loss_weight=0.0, use_proj=False)
                 "n_slices": 4,
                 "n_patches": None,
             },
-            "jepa": {"loss_weight": 0.0},
+            "jepa": {"loss_weight": 0.0, "include_local": True},
             "distillation": {"enabled": False},
             "gram": {"use_loss": False},
             "student": {"arch": "tiny"},
@@ -235,21 +241,48 @@ def test_sigreg_uses_student_global_local_cls_pre_head_views():
     assert "sigreg_cls_effective_rank" in loss_dict
 
 
+def test_jepa_loss_pulls_all_views_to_global_mean_target():
+    global_views = torch.tensor([[[1.0, 3.0]], [[3.0, 5.0]]])
+    local_views = torch.tensor([[[10.0, 10.0]], [[-2.0, 4.0]]])
+
+    loss = JEPALoss()(global_views, local_views)
+
+    target = global_views.mean(0).detach()
+    expected = (target - torch.cat([global_views, local_views], dim=0)).square().mean()
+    assert torch.equal(loss, expected)
+
+
 def test_jepa_uses_student_global_local_cls_pre_head_views():
     arch = _build_arch_for_compute_losses()
     arch.jepa_enabled = True
+    arch.jepa_include_local = True
     arch.jepa_loss_weight = 0.25
     arch.jepa_loss = _JEPALossStub()
     inputs = _loss_inputs()
 
     loss, loss_dict = arch.compute_losses(**inputs)
 
-    expected_views = torch.cat(
-        [inputs["student_global"]["cls_pre_head"], inputs["student_local"]["cls_pre_head"]],
-        dim=0,
-    )
-    assert arch.jepa_loss.seen_shape == (6, 3, 4)
-    assert torch.equal(arch.jepa_loss.seen_views, expected_views)
+    assert arch.jepa_loss.seen_global_shape == (2, 3, 4)
+    assert arch.jepa_loss.seen_local_shape == (4, 3, 4)
+    assert torch.equal(arch.jepa_loss.seen_global_views, inputs["student_global"]["cls_pre_head"])
+    assert torch.equal(arch.jepa_loss.seen_local_views, inputs["student_local"]["cls_pre_head"])
+    assert loss_dict["jepa_loss"].item() == 3.0
+    assert loss.item() == 0.75
+
+
+def test_jepa_can_use_only_global_cls_pre_head_views():
+    arch = _build_arch_for_compute_losses()
+    arch.jepa_enabled = True
+    arch.jepa_include_local = False
+    arch.jepa_loss_weight = 0.25
+    arch.jepa_loss = _JEPALossStub()
+    inputs = _loss_inputs()
+
+    loss, loss_dict = arch.compute_losses(**inputs)
+
+    assert arch.jepa_loss.seen_global_shape == (2, 3, 4)
+    assert arch.jepa_loss.seen_local_shape is None
+    assert torch.equal(arch.jepa_loss.seen_global_views, inputs["student_global"]["cls_pre_head"])
     assert loss_dict["jepa_loss"].item() == 3.0
     assert loss.item() == 0.75
 

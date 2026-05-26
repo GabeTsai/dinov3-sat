@@ -53,6 +53,7 @@ sigreg:
   n_patches: null
 jepa:
   loss_weight: 0.0
+  include_local: true
 gram:
   use_loss: false # (bool) if true gram is used, else not
   compute_stats: false # (bool): if true compute auxilliary stats

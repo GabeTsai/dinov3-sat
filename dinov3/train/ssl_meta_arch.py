@@ -155,6 +155,7 @@ class SSLMetaArch(nn.Module):
         self.koleo_enabled = self.dino_koleo_loss_weight > 0
         self.ibot_enabled = self.ibot_loss_weight > 0
         self.jepa_enabled = self.cfg.jepa.loss_weight > 0
+        self.jepa_include_local = self.cfg.jepa.include_local
         self.jepa_loss_weight = self.cfg.jepa.loss_weight
         self.sigreg_on_cls = self.cfg.sigreg.cls_loss_weight > 0
         self.sigreg_on_patch = self.cfg.sigreg.patch_loss_weight > 0
@@ -747,8 +748,10 @@ class SSLMetaArch(nn.Module):
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
 
         if self.jepa_enabled:
-            views = torch.cat([student_global["cls_pre_head"], student_local["cls_pre_head"]], dim=0)
-            jepa_loss = self.jepa_loss(views)
+            if self.jepa_include_local:
+                jepa_loss = self.jepa_loss(student_global["cls_pre_head"], student_local["cls_pre_head"])
+            else:
+                jepa_loss = self.jepa_loss(student_global["cls_pre_head"])
             loss_dict["jepa_loss"] = jepa_loss
             loss_accumulator += self.jepa_loss_weight * jepa_loss
 
