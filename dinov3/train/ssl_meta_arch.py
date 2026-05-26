@@ -18,7 +18,7 @@ from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
 from dinov3.layers.ffn_layers import Mlp
-from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, SIGReg, iBOTPatchLoss
+from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, SIGReg, iBOTPatchLoss, JEPALoss
 from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import (
     build_gram_loss_weight_schedule,
@@ -154,11 +154,19 @@ class SSLMetaArch(nn.Module):
         self.ibot_loss_weight = self.cfg.ibot.loss_weight
         self.koleo_enabled = self.dino_koleo_loss_weight > 0
         self.ibot_enabled = self.ibot_loss_weight > 0
+        self.jepa_enabled = self.cfg.jepa.loss_weight > 0
+        self.jepa_loss_weight = self.cfg.jepa.loss_weight
         self.sigreg_on_cls = self.cfg.sigreg.cls_loss_weight > 0
         self.sigreg_on_patch = self.cfg.sigreg.patch_loss_weight > 0
         self.sigreg_cls_loss_weight = self.cfg.sigreg.cls_loss_weight
         self.sigreg_patch_loss_weight = self.cfg.sigreg.patch_loss_weight
         self.sigreg_use_proj = self.cfg.sigreg.use_proj
+
+
+        logger.info("OPTIONS -- JEPALoss")
+        logger.info(f"OPTIONS -- JEPALoss -- enabled: {self.jepa_enabled}")
+        if self.jepa_enabled:
+            logger.info(f"OPTIONS -- JEPALoss -- loss_weight: {self.jepa_loss_weight}")
 
         logger.info("OPTIONS -- SIGREG")
         logger.info(f"OPTIONS -- SIGREG -- on_cls: {self.sigreg_on_cls}")
@@ -174,6 +182,9 @@ class SSLMetaArch(nn.Module):
         logger.info(f"OPTIONS -- SIGREG -- n_knots: {self.cfg.sigreg.n_knots}")
         logger.info(f"OPTIONS -- SIGREG -- t_max: {self.cfg.sigreg.t_max}")
         logger.info(f"OPTIONS -- SIGREG -- n_slices: {self.cfg.sigreg.n_slices}")
+
+        if self.jepa_enabled:
+            self.jepa_loss = JEPALoss()
 
         if self.sigreg_on_cls:
             self.sigreg_cls_loss = SIGReg(
@@ -734,6 +745,12 @@ class SSLMetaArch(nn.Module):
         )
         loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
+
+        if self.jepa_enabled:
+            views = torch.cat([student_global["cls_pre_head"], student_local["cls_pre_head"]], dim=0)
+            jepa_loss = self.jepa_loss(views)
+            loss_dict["jepa_loss"] = jepa_loss
+            loss_accumulator += self.jepa_loss_weight * jepa_loss
 
         if self.sigreg_on_cls:
             sigreg_views = torch.cat(

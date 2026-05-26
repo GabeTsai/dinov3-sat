@@ -32,6 +32,17 @@ class _SIGRegStub:
         return views[:, :, :n_patches]
 
 
+class _JEPALossStub:
+    def __init__(self):
+        self.seen_shape = None
+        self.seen_views = None
+
+    def __call__(self, views):
+        self.seen_shape = tuple(views.shape)
+        self.seen_views = views.detach().clone()
+        return views.sum() * 0 + 3.0
+
+
 class _ProjectionStub(nn.Module):
     def __init__(self, out_dim):
         super().__init__()
@@ -62,6 +73,8 @@ def _build_arch_for_compute_losses():
     arch.ibot_loss_weight = 0.0
     arch.koleo_enabled = False
     arch.ibot_enabled = False
+    arch.jepa_enabled = False
+    arch.jepa_loss_weight = 0.0
     arch.sigreg_on_cls = False
     arch.sigreg_on_patch = False
     arch.sigreg_cls_loss_weight = 0.0
@@ -136,6 +149,7 @@ def _minimal_ssl_cfg(cls_loss_weight=0.0, patch_loss_weight=0.0, use_proj=False)
                 "n_slices": 4,
                 "n_patches": None,
             },
+            "jepa": {"loss_weight": 0.0},
             "distillation": {"enabled": False},
             "gram": {"use_loss": False},
             "student": {"arch": "tiny"},
@@ -219,6 +233,25 @@ def test_sigreg_uses_student_global_local_cls_pre_head_views():
     assert "sigreg_cls_std_min" in loss_dict
     assert "sigreg_cls_pairwise_cos_mean" in loss_dict
     assert "sigreg_cls_effective_rank" in loss_dict
+
+
+def test_jepa_uses_student_global_local_cls_pre_head_views():
+    arch = _build_arch_for_compute_losses()
+    arch.jepa_enabled = True
+    arch.jepa_loss_weight = 0.25
+    arch.jepa_loss = _JEPALossStub()
+    inputs = _loss_inputs()
+
+    loss, loss_dict = arch.compute_losses(**inputs)
+
+    expected_views = torch.cat(
+        [inputs["student_global"]["cls_pre_head"], inputs["student_local"]["cls_pre_head"]],
+        dim=0,
+    )
+    assert arch.jepa_loss.seen_shape == (6, 3, 4)
+    assert torch.equal(arch.jepa_loss.seen_views, expected_views)
+    assert loss_dict["jepa_loss"].item() == 3.0
+    assert loss.item() == 0.75
 
 
 def test_sigreg_expensive_metrics_are_rate_limited():
