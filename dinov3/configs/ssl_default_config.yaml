@@ -51,6 +51,8 @@ sigreg:
   t_max: 3.0
   n_slices: 1024
   n_patches: null
+jepa:
+  loss_weight: 0.0
 gram:
   use_loss: false # (bool) if true gram is used, else not
   compute_stats: false # (bool): if true compute auxilliary stats
