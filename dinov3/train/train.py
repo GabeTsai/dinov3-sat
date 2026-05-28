@@ -47,7 +47,7 @@ from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
 from dinov3.train.ssl_meta_arch import SSLMetaArch
 
 import wandb as _wandb
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
 assert torch.__version__ >= (2, 1)
 torch.backends.cuda.matmul.allow_tf32 = True  # pytorch 1.12 sets this to false by default
@@ -62,6 +62,28 @@ def get_effective_ibot_mask_probability(cfg):
     if cfg.ibot.loss_weight == 0 and not cfg.ibot.force_masking:
         return 0.0
     return cfg.ibot.mask_sample_probability
+
+
+def _get_explicit_checkpoint_iterations(keep_every) -> set[int] | None:
+    if isinstance(keep_every, (list, tuple, ListConfig)):
+        return {int(iteration) for iteration in keep_every}
+    return None
+
+
+def should_keep_checkpoint_copy(keep_every, iteration: int) -> bool:
+    explicit_iterations = _get_explicit_checkpoint_iterations(keep_every)
+    if explicit_iterations is not None:
+        return iteration in explicit_iterations
+    return (iteration + 1) % int(keep_every) == 0
+
+
+def should_save_checkpoint(cfg, iteration: int) -> bool:
+    if (iteration + 1) % cfg.checkpointing.period == 0:
+        return True
+    if "keep_every" not in cfg.checkpointing:
+        return False
+    explicit_iterations = _get_explicit_checkpoint_iterations(cfg.checkpointing.keep_every)
+    return explicit_iterations is not None and iteration in explicit_iterations
 
 
 def get_schedule_state(cfg) -> dict[str, int]:
@@ -799,7 +821,7 @@ def do_train(cfg, model, resume=False, trusted_legacy_resume=False):
             torch.cuda.synchronize()
 
         # Checkpointing
-        if (iteration + 1) % cfg.checkpointing.period == 0:
+        if should_save_checkpoint(cfg, iteration):
             torch.cuda.synchronize()
             save_checkpoint(
                 ckpt_dir / str(iteration),
@@ -812,7 +834,9 @@ def do_train(cfg, model, resume=False, trusted_legacy_resume=False):
             )
             if distributed.is_subgroup_main_process():
                 keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
-                if "keep_every" in cfg.checkpointing and (iteration + 1) % cfg.checkpointing.keep_every == 0:
+                if "keep_every" in cfg.checkpointing and should_keep_checkpoint_copy(
+                    cfg.checkpointing.keep_every, iteration
+                ):
                     keep_checkpoint_copy(ckpt_dir / str(iteration))
 
         iteration = iteration + 1

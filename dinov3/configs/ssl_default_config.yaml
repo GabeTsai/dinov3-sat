@@ -197,7 +197,7 @@ evaluation:
 checkpointing:
   period: 3750
   max_to_keep: 3
-  keep_every: 99999999999999999  # Save a checkpoint every N iterations, regardless of max_to_keep and period
+  keep_every: 99999999999999999  # Int: keep every N iterations. List: save and keep the exact iterations.
 
 # Example of constant schedules with schedules v2
 # # schedules:
