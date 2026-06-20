@@ -14,6 +14,8 @@ logger = logging.getLogger("dinov3")
 
 DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES = [1, 2, 4, 8, 16]
 DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS = [0.10, 0.20, 0.35, 0.25, 0.10]
+DEFAULT_STUDENT_GAMMA_SIGMA_PIX_RANGE = (0.03, 0.10)
+DEFAULT_TEACHER_GAMMA_SIGMA_PIX_RANGE = (0.015, 0.05)
 
 
 def make_interpolation_mode(mode_str: str) -> v2.InterpolationMode:

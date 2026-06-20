@@ -14,6 +14,8 @@ from torchvision.transforms import v2
 from dinov3.data.transforms import (
     DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES,
     DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS,
+    DEFAULT_STUDENT_GAMMA_SIGMA_PIX_RANGE,
+    DEFAULT_TEACHER_GAMMA_SIGMA_PIX_RANGE,
     IMAGENET_DEFAULT_MEAN,
     IMAGENET_DEFAULT_STD,
     AddLogGammaSpeckle, GaussianBlur, RandomD4, apply_d4, make_normalize_transform
@@ -60,13 +62,13 @@ class DataAugmentationDINO(object):
         looks_probs = gamma_speckle.get("looks_probs", DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS)
         student_gamma_speckle = AddLogGammaSpeckle(
             p=gamma_speckle.get("student_p", 0.5),
-            sigma_pix_range=tuple(gamma_speckle.get("student_sigma_pix", (0.03, 0.10))),
+            sigma_pix_range=tuple(gamma_speckle.get("student_sigma_pix", DEFAULT_STUDENT_GAMMA_SIGMA_PIX_RANGE)),
             looks_choices=looks_choices,
             looks_probs=looks_probs,
         )
         teacher_gamma_speckle = AddLogGammaSpeckle(
             p=gamma_speckle.get("teacher_p", 0.2),
-            sigma_pix_range=tuple(gamma_speckle.get("teacher_sigma_pix", (0.015, 0.05))),
+            sigma_pix_range=tuple(gamma_speckle.get("teacher_sigma_pix", DEFAULT_TEACHER_GAMMA_SIGMA_PIX_RANGE)),
             looks_choices=looks_choices,
             looks_probs=looks_probs,
         )
