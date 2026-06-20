@@ -4,12 +4,16 @@
 # the terms of the DINOv3 License Agreement.
 
 import logging
+import random
 from typing import Sequence
 
 import torch
 from torchvision.transforms import v2
 
 logger = logging.getLogger("dinov3")
+
+DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES = [1, 2, 4, 8, 16]
+DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS = [0.10, 0.20, 0.35, 0.25, 0.10]
 
 
 def make_interpolation_mode(mode_str: str) -> v2.InterpolationMode:
@@ -21,13 +25,98 @@ class GaussianBlur(v2.RandomApply):
     Apply Gaussian Blur to the PIL image.
     """
 
-    def __init__(self, *, p: float = 0.5, radius_min: float = 0.1, radius_max: float = 2.0):
+    def __init__(self, p: float = 0.5, radius_min: float = 0.1, radius_max: float = 2.0):
         # NOTE: torchvision is applying 1 - probability to return the original image
         keep_p = 1 - p
         transform = v2.GaussianBlur(kernel_size=9, sigma=(radius_min, radius_max))
         super().__init__(transforms=[transform], p=keep_p)
 
 
+def apply_d4(x, k: int):
+    if k == 0:   # e: identity
+        return x
+    elif k == 1: # r90
+        return torch.rot90(x, 1, [-2, -1])
+    elif k == 2: # r180
+        return torch.rot90(x, 2, [-2, -1])
+    elif k == 3: # r270
+        return torch.rot90(x, 3, [-2, -1])
+    elif k == 4: # v: vertical flip
+        return torch.flip(x, [-2])
+    elif k == 5: # h: horizontal flip
+        return torch.flip(x, [-1])
+    elif k == 6: # t: transpose (diagonal reflection)
+        return x.transpose(-2, -1)
+    else:        # hvt: anti-diagonal reflection = t(r180)
+        return torch.rot90(x, 2, [-2, -1]).transpose(-2, -1)
+
+
+class RandomD4:
+    def __init__(self, p: float = 1.0):
+        self.p = p
+    
+    def __call__(self, x):
+        if self.p == 0 or random.random() > self.p:
+            return x
+        return apply_d4(x, random.randint(0, 7))
+
+class AddLogGammaSpeckle:
+    """
+    Add log-Gamma speckle to an already log-domain SAR tensor.
+    Expects a floating point tensor in image units, typically [0, 1] before
+    normalization. `sigma_pix` directly controls the pixel
+    standard deviation of the additive log-noise in those units.
+    """
+
+    def __init__(
+        self,
+        p: float = 0.5,
+        sigma_pix_range: tuple[float, float] = (0.025, 0.10),
+        looks_choices: Sequence[int] = DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES,
+        looks_probs: Sequence[float] = DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS,
+    ):
+        if not 0 <= p <= 1:
+            raise ValueError("p must be in [0, 1]")
+        if len(sigma_pix_range) != 2 or sigma_pix_range[0] < 0 or sigma_pix_range[1] < sigma_pix_range[0]:
+            raise ValueError("sigma_pix_range must be a non-negative (min, max) pair")
+        if len(looks_choices) != len(looks_probs):
+            raise ValueError("looks_choices and looks_probs must have the same length")
+        if any(look <= 0 for look in looks_choices):
+            raise ValueError("looks_choices must be positive")
+        if any(prob < 0 for prob in looks_probs) or sum(looks_probs) <= 0:
+            raise ValueError("looks_probs must be non-negative and have positive sum")
+
+        self.p = float(p)
+        self.sigma_pix_range = (float(sigma_pix_range[0]), float(sigma_pix_range[1]))
+        self.looks_choices = tuple(float(look) for look in looks_choices)
+        prob_sum = float(sum(looks_probs))
+        self.looks_probs = tuple(float(prob) / prob_sum for prob in looks_probs)
+
+    def __call__(self, x):
+        if self.p == 0 or random.random() > self.p:
+            return x
+        if not torch.is_floating_point(x):
+            raise TypeError("AddLogGammaSpeckle expects a floating point tensor")
+
+        work_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+        x_float = x.to(dtype=work_dtype)
+        device = x_float.device
+
+        looks_choices = torch.tensor(self.looks_choices, dtype=work_dtype, device=device)
+        looks_probs = torch.tensor(self.looks_probs, dtype=work_dtype, device=device)
+        looks = looks_choices[torch.multinomial(looks_probs, num_samples=1).item()]
+
+        sigma_min, sigma_max = self.sigma_pix_range
+        sigma_pix = torch.empty((), dtype=work_dtype, device=device).uniform_(sigma_min, sigma_max)
+        strength = sigma_pix / torch.sqrt(torch.special.polygamma(1, looks))
+
+        gamma = torch.distributions.Gamma(concentration=looks, rate=looks)
+        noise = gamma.sample(x_float.shape).to(device=device, dtype=work_dtype)
+        log_noise = torch.log(noise.clamp_min(torch.finfo(work_dtype).tiny))
+        log_noise = log_noise - log_noise.mean()
+
+        return (x_float + strength * log_noise).clamp(0.0, 1.0).to(dtype=x.dtype)
+        
 # Use timm's names
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)

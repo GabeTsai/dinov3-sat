@@ -11,32 +11,15 @@ import torch
 from torch import nn
 from torchvision.transforms import v2
 
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, GaussianBlur, make_normalize_transform
+from dinov3.data.transforms import (
+    DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES,
+    DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS,
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
+    AddLogGammaSpeckle, GaussianBlur, RandomD4, apply_d4, make_normalize_transform
+)
 
 logger = logging.getLogger("dinov3")
-
-class RandomD4: 
-    """
-    Torch-ified version of RandomD4 from Albumentations.
-    """
-    def __call__(self, x):
-        k = random.randint(0, 7)
-        if k == 0:   # e: identity
-            return x
-        elif k == 1: # r90
-            return torch.rot90(x, 1, [-2, -1])
-        elif k == 2: # r180
-            return torch.rot90(x, 2, [-2, -1])
-        elif k == 3: # r270
-            return torch.rot90(x, 3, [-2, -1])
-        elif k == 4: # v: vertical flip
-            return torch.flip(x, [-2])
-        elif k == 5: # h: horizontal flip
-            return torch.flip(x, [-1])
-        elif k == 6: # t: transpose (diagonal reflection)
-            return x.transpose(-2, -1)
-        else:        # hvt: anti-diagonal reflection = t(r180)
-            return torch.rot90(x, 2, [-2, -1]).transpose(-2, -1)
 
 class DataAugmentationDINO(object):
     def __init__(
@@ -54,6 +37,7 @@ class DataAugmentationDINO(object):
         share_color_jitter=False,
         horizontal_flips=True,
         gaussian_blur=True,
+        gamma_speckle=None,
         mean=IMAGENET_DEFAULT_MEAN,
         std=IMAGENET_DEFAULT_STD,
     ):
@@ -70,6 +54,25 @@ class DataAugmentationDINO(object):
         self.share_color_jitter = share_color_jitter
         self.mean = mean
         self.std = std
+        gamma_speckle = gamma_speckle or {}
+        self.gamma_speckle_enabled = gamma_speckle.get("enabled", False)
+        looks_choices = gamma_speckle.get("looks_choices", DEFAULT_GAMMA_SPECKLE_LOOKS_CHOICES)
+        looks_probs = gamma_speckle.get("looks_probs", DEFAULT_GAMMA_SPECKLE_LOOKS_PROBS)
+        student_gamma_speckle = AddLogGammaSpeckle(
+            p=gamma_speckle.get("student_p", 0.5),
+            sigma_pix_range=tuple(gamma_speckle.get("student_sigma_pix", (0.03, 0.10))),
+            looks_choices=looks_choices,
+            looks_probs=looks_probs,
+        )
+        teacher_gamma_speckle = AddLogGammaSpeckle(
+            p=gamma_speckle.get("teacher_p", 0.2),
+            sigma_pix_range=tuple(gamma_speckle.get("teacher_sigma_pix", (0.015, 0.05))),
+            looks_choices=looks_choices,
+            looks_probs=looks_probs,
+        )
+        self.student_gamma_speckle = student_gamma_speckle if self.gamma_speckle_enabled else nn.Identity()
+        self.teacher_gamma_speckle = teacher_gamma_speckle if self.gamma_speckle_enabled else nn.Identity()
+        self.use_separate_teacher_global_crops = teacher_no_color_jitter or self.gamma_speckle_enabled
 
         logger.info("###################################")
         logger.info("Using data augmentation parameters:")
@@ -85,6 +88,9 @@ class DataAugmentationDINO(object):
         logger.info(f"patch_size if local_crops_subset_of_global_crops: {patch_size}")
         logger.info(f"share_color_jitter: {share_color_jitter}")
         logger.info(f"horizontal flips: {horizontal_flips}")
+        logger.info(f"gamma_speckle_enabled: {self.gamma_speckle_enabled}")
+        if self.gamma_speckle_enabled:
+            logger.info(f"gamma_speckle: {gamma_speckle}")
         logger.info("###################################")
 
         # Global crops and gram teacher crops can have different sizes. We first take a crop of the maximum size
@@ -171,28 +177,50 @@ class DataAugmentationDINO(object):
             global_transfo1_extra, local_transfo_extra = color_jittering_strong, color_jittering_strong
             global_transfo2_extra = color_jittering_weak
 
-        # normalization
-        self.normalize = v2.Compose(
+        self.to_float_image = v2.Compose(
             [
                 v2.ToImage(),
                 v2.ToDtype(torch.float32, scale=True),
-                make_normalize_transform(mean=mean, std=std),
             ]
         )
+        self.normalize = make_normalize_transform(mean=mean, std=std)
 
         if self.share_color_jitter:
             self.color_jittering = color_jittering_strong
-            self.global_transfo1 = v2.Compose([resize_global, self.normalize, RandomD4()])
-            self.global_transfo2 = v2.Compose([resize_global, self.normalize, RandomD4()])
-            self.local_transfo = v2.Compose([self.normalize, RandomD4()])
-        else:
             self.global_transfo1 = v2.Compose(
-                [resize_global, global_transfo1_extra, self.normalize, RandomD4()]
+                [resize_global, self.to_float_image, self.student_gamma_speckle, self.normalize]
             )
             self.global_transfo2 = v2.Compose(
-                [resize_global, global_transfo2_extra, self.normalize, RandomD4()]
+                [resize_global, self.to_float_image, self.student_gamma_speckle, self.normalize]
             )
-            self.local_transfo = v2.Compose([local_transfo_extra, self.normalize, RandomD4()])
+            self.local_transfo = v2.Compose(
+                [self.to_float_image, self.student_gamma_speckle, self.normalize, RandomD4()]
+            )
+        else:
+            self.global_transfo1 = v2.Compose(
+                [
+                    resize_global,
+                    global_transfo1_extra,
+                    self.to_float_image,
+                    self.student_gamma_speckle,
+                    self.normalize,
+                ]
+            )
+            self.global_transfo2 = v2.Compose(
+                [
+                    resize_global,
+                    global_transfo2_extra,
+                    self.to_float_image,
+                    self.student_gamma_speckle,
+                    self.normalize,
+                ]
+            )
+            self.local_transfo = v2.Compose(
+                [local_transfo_extra, self.to_float_image, self.student_gamma_speckle, self.normalize, RandomD4()]
+            )
+        self.teacher_transfo = v2.Compose(
+            [resize_global, self.to_float_image, self.teacher_gamma_speckle, self.normalize]
+        )
 
     def __call__(self, image):
         output = {}
@@ -203,20 +231,22 @@ class DataAugmentationDINO(object):
 
         # global crops:
         im1_base = self.geometric_augmentation_global(image)
-        global_crop_1_transf = self.global_transfo1(im1_base)
+        d4_1 = random.randint(0, 7)
+        global_crop_1_transf = apply_d4(self.global_transfo1(im1_base), d4_1)
         global_crop_1 = self.resize_global_post_transf(global_crop_1_transf)
 
         im2_base = self.geometric_augmentation_global(image)
-        global_crop_2_transf = self.global_transfo2(im2_base)
+        d4_2 = random.randint(0, 7)
+        global_crop_2_transf = apply_d4(self.global_transfo2(im2_base), d4_2)
         global_crop_2 = self.resize_global_post_transf(global_crop_2_transf)
 
         output["global_crops"] = [global_crop_1, global_crop_2]
 
         # global crops for teacher:
-        if self.teacher_no_color_jitter:
+        if self.use_separate_teacher_global_crops:
             output["global_crops_teacher"] = [
-                self.normalize(im1_base),
-                self.normalize(im2_base),
+                self.resize_global_post_transf(apply_d4(self.teacher_transfo(im1_base), d4_1)),
+                self.resize_global_post_transf(apply_d4(self.teacher_transfo(im2_base), d4_2)),
             ]
         else:
             output["global_crops_teacher"] = [global_crop_1, global_crop_2]
@@ -224,8 +254,8 @@ class DataAugmentationDINO(object):
         if self.gram_teacher_crops_size is not None:
             # crops for gram teacher:
             if self.gram_teacher_no_distortions:
-                gram_crop_1 = self.normalize(self.resize_gram_teacher(im1_base))
-                gram_crop_2 = self.normalize(self.resize_gram_teacher(im2_base))
+                gram_crop_1 = self.normalize(self.to_float_image(self.resize_gram_teacher(im1_base)))
+                gram_crop_2 = self.normalize(self.to_float_image(self.resize_gram_teacher(im2_base)))
             else:
                 gram_crop_1 = self.resize_gram_teacher(global_crop_1_transf)
                 gram_crop_2 = self.resize_gram_teacher(global_crop_2_transf)

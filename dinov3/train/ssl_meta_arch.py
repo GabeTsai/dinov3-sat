@@ -478,6 +478,9 @@ class SSLMetaArch(nn.Module):
         metrics_dict["global_batch_size"] = data["global_batch_size"]
 
         global_crops = data["collated_global_crops"].cuda(non_blocking=True)
+        global_crops_teacher = data.get("collated_global_crops_teacher", data["collated_global_crops"]).cuda(
+            non_blocking=True
+        )
         local_crops = data["collated_local_crops"].cuda(non_blocking=True)
         masks = data["collated_masks"].cuda(non_blocking=True)
         mask_indices_list = data["mask_indices_list"].cuda(non_blocking=True)
@@ -494,7 +497,7 @@ class SSLMetaArch(nn.Module):
 
         # Teacher output (will trigger an all-gather to unshard)
         teacher_global = self.get_teacher_output(
-            global_crops.unflatten(0, (n_global_crops, B)),
+            global_crops_teacher.unflatten(0, (n_global_crops, B)),
             teacher_temp=teacher_temp,
             n_masked_patches_tensor=n_masked_patches_tensor,
             mask_indices_list=mask_indices_list,
@@ -952,7 +955,8 @@ class SSLMetaArch(nn.Module):
             local_crops_subset_of_global_crops=cfg.crops.localcrops_subset_of_globalcrops,
             share_color_jitter=cfg.crops.share_color_jitter,
             horizontal_flips=cfg.crops.horizontal_flips,
-            gaussian_blur=cfg.crops.gaussian_blur,
+            gaussian_blur=cfg.crops.get("gaussian_blur", True),
+            gamma_speckle=cfg.crops.get("gamma_speckle", None),
             mean=cfg.crops.rgb_mean,
             std=cfg.crops.rgb_std,
         )

@@ -178,6 +178,18 @@ crops:
   localcrops_subset_of_globalcrops: false
   share_color_jitter: false
   horizontal_flips: true
+  gamma_speckle:
+    enabled: false
+    looks_choices: [1, 2, 4, 8, 16]
+    looks_probs: [0.10, 0.20, 0.35, 0.25, 0.10]
+    student_p: 0.5
+    student_sigma_pix:
+    - 0.03
+    - 0.10
+    teacher_p: 0.2
+    teacher_sigma_pix:
+    - 0.015
+    - 0.05
   gram_teacher_no_distortions: false  # If True, no distortions are applied to gram teacher crops
   rgb_mean:
   - 0.485

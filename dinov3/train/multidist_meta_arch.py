@@ -38,6 +38,9 @@ class MultiDistillationMetaArch(SSLMetaArch):
         metrics_dict["batch_size"] = B
 
         global_crops = data["collated_global_crops"].cuda(non_blocking=True)
+        global_crops_teacher = data.get("collated_global_crops_teacher", data["collated_global_crops"]).cuda(
+            non_blocking=True
+        )
         local_crops = data["collated_local_crops"].cuda(non_blocking=True)
         masks = data["collated_masks"].cuda(non_blocking=True)
         mask_indices_list = data["mask_indices_list"].cuda(non_blocking=True)
@@ -56,6 +59,12 @@ class MultiDistillationMetaArch(SSLMetaArch):
                 mode="bilinear",
                 antialias=True,
             )
+            global_crops_teacher = torch.nn.functional.interpolate(
+                global_crops_teacher,
+                scale_factor=1.0 / downsampling_factor,
+                mode="bilinear",
+                antialias=True,
+            )
         global_crops_subgroup = self.broadcast_to_subgroups(
             global_crops.view(n_global_crops, -1, *global_crops.shape[1:]),
             1,
@@ -70,7 +79,7 @@ class MultiDistillationMetaArch(SSLMetaArch):
 
         # Teacher output (will trigger an all-gather to unshard)
         teacher_global = self.get_teacher_output(
-            global_crops.unflatten(0, (n_global_crops, B_teacher)),
+            global_crops_teacher.unflatten(0, (n_global_crops, B_teacher)),
             teacher_temp=teacher_temp,
             n_masked_patches_tensor=n_masked_patches_tensor,
             mask_indices_list=mask_indices_list,

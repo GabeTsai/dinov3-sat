@@ -24,6 +24,12 @@ def collate_data_and_cast(
     collated_global_crops = torch.stack(
         [s[0]["global_crops"][i] for i in range(n_global_crops) for s in samples_list]
     )  # [n_global_crops, B, ...]
+    if "global_crops_teacher" in samples_list[0][0]:
+        collated_global_crops_teacher = torch.stack(
+            [s[0]["global_crops_teacher"][i] for i in range(n_global_crops) for s in samples_list]
+        )  # [n_global_crops, B, ...]
+    else:
+        collated_global_crops_teacher = collated_global_crops
     collated_local_crops = torch.stack([s[0]["local_crops"][i] for i in range(n_local_crops) for s in samples_list])
     if "gram_teacher_crops" in samples_list[0][0]:
         collated_gram_teacher_crops = torch.stack(
@@ -66,6 +72,7 @@ def collate_data_and_cast(
 
     out = {
         "collated_global_crops": collated_global_crops.to(dtype),
+        "collated_global_crops_teacher": collated_global_crops_teacher.to(dtype),
         "collated_local_crops": collated_local_crops.to(dtype),
         "collated_masks": collated_masks,
         "mask_indices_list": mask_indices_list,
@@ -85,6 +92,15 @@ def get_batch_subset(collated_data_batch, divide_by):
     collated_global_crops = (
         collated_data_batch["collated_global_crops"].unflatten(0, (2, old_bs)).narrow(1, 0, target_bs).flatten(0, 1)
     )
+    if "collated_global_crops_teacher" in collated_data_batch:
+        collated_global_crops_teacher = (
+            collated_data_batch["collated_global_crops_teacher"]
+            .unflatten(0, (2, old_bs))
+            .narrow(1, 0, target_bs)
+            .flatten(0, 1)
+        )
+    else:
+        collated_global_crops_teacher = collated_global_crops
     collated_local_crops = (
         collated_data_batch["collated_local_crops"].unflatten(0, (-1, old_bs)).narrow(1, 0, target_bs).flatten(0, 1)
     )
@@ -111,6 +127,7 @@ def get_batch_subset(collated_data_batch, divide_by):
 
     new_batch = {
         "collated_global_crops": collated_global_crops,
+        "collated_global_crops_teacher": collated_global_crops_teacher,
         "collated_local_crops": collated_local_crops,
         "collated_masks": collated_masks,
         "mask_indices_list": mask_indices_list,
