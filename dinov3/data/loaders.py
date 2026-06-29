@@ -10,16 +10,26 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from PIL import Image
 from torch.utils.data import Sampler
-from torchvision.datasets import ImageFolder
+from torchvision.datasets import ImageFolder as TorchvisionImageFolder
+
+from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
+from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
 
 def _grayscale_loader(path: str) -> Image.Image:
     return Image.open(path).convert("L")
 
-from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
-from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
-
 logger = logging.getLogger("dinov3")
+
+
+class ImageFolder(TorchvisionImageFolder):
+    def find_classes(self, directory: str):
+        classes, _ = super().find_classes(directory)
+        classes = [class_name for class_name in classes if not class_name.startswith(".")]
+        if not classes:
+            raise FileNotFoundError(f"Couldn't find any non-hidden class folder in {directory}.")
+        class_to_idx = {class_name: i for i, class_name in enumerate(classes)}
+        return classes, class_to_idx
 
 
 class SamplerType(Enum):
